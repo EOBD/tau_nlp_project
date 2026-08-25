@@ -192,3 +192,18 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Project-local (cluster data, run outputs, envs, build artifacts)
+datasets/
+data/
+runs/
+.mt_env/
+.bench_env/
+.build/
+.hf_cache/
+package-lock.json
+.claude/
+
+# Kept local only, not pushed
+reports/
+paper/
