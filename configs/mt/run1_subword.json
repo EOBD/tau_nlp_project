@@ -1,0 +1,11 @@
+{
+  "model": "subword",
+  "vocab_size": 16000,
+  "d_model": 512,
+  "n_heads": 8,
+  "mlp_ratio": 2.75,
+  "enc_layers": 10,
+  "dec_layers": 2,
+  "dropout": 0.1,
+  "label_smoothing": 0.1
+}
