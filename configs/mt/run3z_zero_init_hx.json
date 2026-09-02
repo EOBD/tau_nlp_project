@@ -1,0 +1,17 @@
+{
+  "model": "two_memory",
+  "d_byte": 256,
+  "d_model": 512,
+  "n_heads": 8,
+  "mlp_ratio": 2.75,
+  "pre_layers": 1,
+  "backbone_layers": 11,
+  "chunk_grad": "logpi",
+  "dec_layers": 2,
+  "router_mode": "learned",
+  "target_ratio": 5.5,
+  "ratio_loss_weight": 0.03,
+  "dropout": 0.1,
+  "label_smoothing": 0.1,
+  "byte_memory_zero_init": true
+}
