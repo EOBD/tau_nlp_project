@@ -3,22 +3,23 @@
     python -m mi_experiments.morph_data [--out data/morph] [--refresh]
 
 Downloads to <out>/raw/ (skipped if present): UD_Hebrew-HTB, -IAHLTwiki, -IAHLTknesset (train/dev/test) and the
-kaikki.org Hebrew Wiktionary extract. Writes:
+kaikki.org English-Wiktionary Hebrew extract; Hebrew Wiktionary pages are fetched through its API only for verbs no
+other source covers, and cached in <out>/raw/hewiktionary_pages.json. Writes:
 
   ud_verbs.jsonl   one row per VERB token in context: sentence text, character span of the whitespace word
                    (start/end, includes clitics like ו/ש/כש) and of the verb host inside it (host_start/host_end),
                    lemma, binyan, tense, person, gender, number, root, root_source, root_class, lexicon ambiguity
   lexicon.jsonl    one row per (lemma, cell, unvocalized spelling) from the Wiktionary conjugation tables
   weak_roots_to_check.csv
-                   lemmas whose root was derived by rule in a class where the rule is unreliable; fill correct_root
-                   (letters, any separator) and rerun: filled values are kept across rebuilds and win over everything
+                   lemmas no source gives a root for (their root is null); fill correct_root (letters, any separator)
+                   and rerun: filled values are kept across rebuilds and win over everything
   stats.json       counts, and the rule's accuracy per root class against Wiktionary's own roots
 
 Conventions: binyan names follow UD (PAAL NIFAL PIEL PUAL HIFIL HUFAL HITPAEL). tense is one of past present future
 imperative infinitive (lexicon also: gerund, passive_participle). Present tense has no person (UD's 1,2,3 / 3 on
 participles is dropped). gender "m,f" = common form. Roots are letters joined by "־" with final letters normalised
-(כ־ת־ב, ש־מ־ר). root_source: manual (the CSV) > wiktionary > derived (rule below, ~88% on Wiktionary's roots, wrong
-mostly on weak roots). Text is unvocalized, as the model sees it.
+(כ־ת־ב, ש־מ־ר). root_source: manual (the CSV) > wiktionary (English) > derived (the rule below, only in root classes
+where it matches English Wiktionary >= 95%) > hewiktionary > null. Text is unvocalized, as the model sees it.
 """
 
 import argparse
@@ -178,6 +179,129 @@ def load_wiktionary(path):
     return lex
 
 
+# ============================================================================================ Hebrew Wiktionary
+
+HEWIKT_API = "https://he.wiktionary.org/w/api.php"
+HE_BINYAN = {"קל": "PAAL", "פעל": "PAAL", "פָּעַל": "PAAL", "נפעל": "NIFAL", "נִפְעַל": "NIFAL", "פיעל": "PIEL",
+             "פִּעֵל": "PIEL", "פועל": "PUAL", "פֻּעַל": "PUAL", "הפעיל": "HIFIL", "הִפְעִיל": "HIFIL",
+             "הופעל": "HUFAL", "הפעל": "HUFAL", "הֻפְעַל": "HUFAL", "התפעל": "HITPAEL", "הִתְפַּעֵל": "HITPAEL"}
+REDIRECT = re.compile(r"^\s*#(?:הפניה|REDIRECT)\s*\[\[([^\]|#]+)", re.I)
+
+
+def fetch_hewiktionary(cache_path, titles):
+    """Page wikitext by title ("" = no such page), cached in cache_path; only titles not in the cache are fetched.
+    Redirect pages are stored as their redirect text and resolved by the caller."""
+    import time
+    import urllib.error
+    import urllib.parse
+    pages = json.load(open(cache_path, encoding="utf-8")) if os.path.exists(cache_path) else {}
+    todo = sorted(set(titles) - set(pages))
+    if todo:
+        print(f"fetching {len(todo)} Hebrew Wiktionary pages")
+    i, wait = 0, 3
+    while i < len(todo):
+        batch = todo[i:i + 20]
+        data = urllib.parse.urlencode({"action": "query", "prop": "revisions", "rvprop": "content", "rvslots": "main",
+                                       "format": "json", "formatversion": 2, "maxlag": 5,
+                                       "titles": "|".join(batch)}).encode()
+        req = urllib.request.Request(HEWIKT_API, data=data,
+                                     headers={"User-Agent": "tau-nlp-research/0.1 (university student research project)"})
+        try:
+            d = json.load(urllib.request.urlopen(req, timeout=60))
+        except urllib.error.HTTPError as e:  # 429 / maxlag: back off
+            wait = min(max(wait * 2, int(e.headers.get("Retry-After") or 0)), 300)
+            time.sleep(wait)
+            continue
+        norm = {n["to"]: n["from"] for n in d["query"].get("normalized", [])}
+        got = {norm.get(p["title"], p["title"]): p.get("revisions", [{}])[0].get("slots", {}).get("main", {})
+               .get("content", "") for p in d["query"]["pages"]}
+        for t in batch:
+            pages[t] = got.get(t, "")
+        with open(cache_path + ".part", "w", encoding="utf-8") as f:
+            json.dump(pages, f, ensure_ascii=False)
+        os.replace(cache_path + ".part", cache_path)
+        i, wait = i + 20, 3
+        time.sleep(3)
+    return pages
+
+
+def parse_hewiktionary(text):
+    """[(binyan, root)] from the verb grammar boxes ({{ניתוח דקדוקי לפועל|...|שורש וגזרה={{שרש3|נ|ג|ע}}|בניין=הפעיל}})."""
+    out = []
+    for blk in re.split(r"\{\{ניתוח דקדוקי", text)[1:]:
+        blk = blk[:1500]
+        b = re.search(r"\|\s*בניין\s*=\s*\[*([^\n|\]}]*)", blk)
+        r = re.search(r"\{\{שרש(\d)\|([^}]*)\}\}", blk)
+        if not (b and r):
+            continue
+        name = b.group(1).split("#")[-1].replace("(קל)", "").strip()
+        binyan = HE_BINYAN.get(name)
+        # positional args only, and only as many as the template's letter count (drops homograph numbers, גזרה=...)
+        root = norm_root("".join([x.strip() for x in r.group(2).split("|") if "=" not in x][:int(r.group(1))]))
+        if binyan and root:
+            out.append((binyan, root))
+    return out
+
+
+def spelling_variants(w):
+    """w plus its defective spellings (Hebrew Wiktionary titles many verbs without the ו/י vowel letters): drop any
+    subset of inner ו/י, collapse יי/וו."""
+    import itertools
+    out = {w, w.replace("יי", "י").replace("וו", "ו")}
+    idx = [i for i, c in enumerate(w) if c in "וי" and 0 < i < len(w) - 1]
+    for k in range(1, len(idx) + 1):
+        for comb in itertools.combinations(idx, k):
+            out.add("".join(c for i, c in enumerate(w) if i not in comb))
+    return out
+
+
+class HeWiktionary:
+    """Root lookup by (lemma, binyan). A root is returned only if exactly one root is listed for that binyan: first
+    on the page titled with the lemma itself, else across its defective spellings (the binyan must still match, which
+    keeps a variant from hitting an unrelated word)."""
+
+    def __init__(self, cache_path):
+        self.cache_path = cache_path
+        self.pages = json.load(open(cache_path, encoding="utf-8")) if os.path.exists(cache_path) else {}
+
+    def text(self, title):
+        t = self.pages.get(title, "")
+        m = REDIRECT.match(t)
+        return self.pages.get(m.group(1).strip(), "") if m else t
+
+    def needed_titles(self, lemmas):
+        """Titles to fetch for these lemmas: the lemma itself, then its variants if the lemma has no verb box, then
+        redirect targets. Call fetch() until this is empty."""
+        out = set()
+        for lem in lemmas:
+            if lem not in self.pages:
+                out.add(lem)
+            elif not parse_hewiktionary(self.text(lem)):
+                out |= {v for v in spelling_variants(lem) if v not in self.pages}
+        for t in list(self.pages):
+            m = REDIRECT.match(self.pages[t])
+            if m and m.group(1).strip() not in self.pages:
+                out.add(m.group(1).strip())
+        return out
+
+    def fetch(self, lemmas):
+        while True:
+            need = self.needed_titles(lemmas)
+            if not need:
+                return
+            self.pages = fetch_hewiktionary(self.cache_path, need)
+
+    def candidates(self, lemma, binyan):
+        c = {r for b, r in parse_hewiktionary(self.text(lemma)) if b == binyan}
+        if c:
+            return c
+        return {r for v in spelling_variants(lemma) for b, r in parse_hewiktionary(self.text(v)) if b == binyan}
+
+    def root(self, lemma, binyan):
+        c = self.candidates(lemma, binyan)
+        return next(iter(c)) if len(c) == 1 else None
+
+
 # ============================================================================================ UD
 
 def ud_feats(s):
@@ -261,20 +385,44 @@ def main():
     rule_acc = {c: rule_ok[c] / rule_n[c] for c in rule_n}
     trusted = {c for c, a in rule_acc.items() if a >= TRUSTED_RULE_ACC and rule_n[c] >= 20}
 
+    # Hebrew Wiktionary, for the verbs neither a person, English Wiktionary nor a trusted rule class covers
+    ud_lemmas = {(c[2], ud_feats(c[5]).get("HebBinyan")) for url in UD.values() for split in ("train", "dev", "test")
+                 for _, _, rows, _ in read_conllu(os.path.join(raw, os.path.basename(url.format(split))))
+                 for c in rows if c[3] == "VERB" and "-" not in c[0] and "." not in c[0]}
+    all_lemmas = ud_lemmas | {(e["lemma"], b) for (_, b), e in lex.items()}
+    hewikt = HeWiktionary(os.path.join(raw, "hewiktionary_pages.json"))
+
+    def rule_ok(lem, b):
+        return root_class(derive_root(lem, b)) in trusted
+
+    def uncovered(lem, b):
+        k = (letters(lem), b)
+        return k not in manual and not (k in lex and lex[k]["root"]) and not rule_ok(lem, b)
+
+    hewikt.fetch({lem for lem, b in all_lemmas if b and letters(lem) and uncovered(lem, b)})
+
     def root_of(lem, b):
+        """manual > English Wiktionary > rule (trusted classes only) > Hebrew Wiktionary > None."""
         k = (letters(lem), b)
         if k in manual:
             return manual[k], "manual"
         if k in lex and lex[k]["root"]:
             return lex[k]["root"], "wiktionary"
-        d = derive_root(lem, b)
-        return (d, "derived") if d else (None, None)
+        if rule_ok(lem, b):
+            return derive_root(lem, b), "derived"
+        r = hewikt.root(lem, b) if b in BINYAN.values() else None
+        return (r, "hewiktionary") if r else (None, None)
+
+    # the two dictionaries against each other, on verbs where both have a root (pages already in the cache)
+    both = [(e["root"], hewikt.candidates(e["lemma"], b)) for (_, b), e in lex.items()
+            if e["root"] and e["lemma"] in hewikt.pages]
+    both = [(g, c) for g, c in both if c]
 
     # ---- lexicon
     analyses = defaultdict(set)  # spelling -> {(lemma, binyan, tense, person, gender, number)}
     lex_rows = []
     for (lem, b), e in sorted(lex.items()):
-        root, src = root_of(lem, b)
+        root, src = root_of(e["lemma"], b)
         for c, (spellings, how) in sorted(e["cells"].items(), key=lambda x: str(x[0])):
             for s in sorted(spellings):
                 analyses[s].add((lem, b) + c)
@@ -316,7 +464,7 @@ def main():
                         "lex_n_analyses": len(a), "lex_n_binyanim": len({x[1] for x in a}),
                     })
 
-    # ---- roots to check by hand: derived, in a class where the rule is unreliable
+    # ---- roots to check by hand: verbs no source gives a root for
     ud_count, ud_example, spelled = Counter(), {}, {k: e["lemma"] for k, e in lex.items()}
     for r in ud_rows:
         k = (letters(r["lemma"]), r["binyan"])
@@ -326,18 +474,17 @@ def main():
     check = {}
     for k in set(ud_count) | set(lex):
         lem, b = k
-        d = derive_root(lem, b)
-        gold = lex.get(k, {}).get("root")
-        if gold is None and root_class(d) not in trusted:
-            check[k] = d
+        if b in BINYAN.values() and len(lem) >= 2 and (k in manual or root_of(spelled.get(k, lem), b)[0] is None):
+            check[k] = derive_root(lem, b)
     with open(check_path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
-        w.writerow(["lemma", "binyan", "derived_root", "derived_class", "rule_accuracy_in_class", "ud_tokens",
-                    "in_lexicon", "example", "correct_root"])
+        w.writerow(["lemma", "binyan", "derived_root", "derived_class", "rule_accuracy_in_class",
+                    "hewiktionary_candidates", "ud_tokens", "in_lexicon", "example", "correct_root"])
         for (lem, b), d in sorted(check.items(), key=lambda x: (-ud_count[x[0]], x[0])):
             c = root_class(d)
-            w.writerow([spelled.get((lem, b), lem), b, d, c, f"{rule_acc.get(c, 0):.2f}", ud_count[(lem, b)], (lem, b) in lex,
-                        ud_example.get((lem, b), ""), manual.get((lem, b)) or ""])
+            w.writerow([spelled.get((lem, b), lem), b, d, c, f"{rule_acc.get(c, 0):.2f}",
+                        " ".join(sorted(hewikt.candidates(spelled.get((lem, b), lem), b))), ud_count[(lem, b)],
+                        (lem, b) in lex, ud_example.get((lem, b), ""), manual.get((lem, b)) or ""])
 
     for name, rows in (("lexicon.jsonl", lex_rows), ("ud_verbs.jsonl", ud_rows)):
         with open(os.path.join(args.out, name), "w", encoding="utf-8") as f:
@@ -366,6 +513,11 @@ def main():
         "lexicon_forms_in_2plus_binyanim": sum(len({x[1] for x in a}) > 1 for a in analyses.values()),
         "rule_accuracy_by_class": {c: [round(rule_acc[c], 3), rule_n[c]] for c in sorted(rule_n)},
         "rule_trusted_classes": sorted(trusted),
+        "ud_rooted_by_class": Counter(r["root_class"] for r in ud_rows if r["root"]),
+        "ud_rooted_verbs_by_class": Counter(c for c, _ in {(r["root_class"], (r["lemma"], r["binyan"]))
+                                                          for r in ud_rows if r["root"]}),
+        "hewiktionary_vs_wiktionary": [sum(g in c for g, c in both), len(both)],
+        "hewiktionary_pages_cached": len(hewikt.pages),
         "to_check": len(check), "to_check_filled": sum(1 for k in check if k in manual),
         "manual_roots": len(manual),
     }
