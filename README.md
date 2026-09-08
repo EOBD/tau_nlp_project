@@ -1,3 +1,22 @@
+# TAU NLP project: H-Net for Hebrew
+
+This is a fork of [goombalab/hnet](https://github.com/goombalab/hnet). The upstream H-Net code (`hnet/`, `generate.py`, the original `configs/*.json`) is unchanged; our work lives in the directories below.
+
+```
+mt/                 # Hebrew->English MT: subword baseline vs. H-Net encoder variants (train/evaluate/flops/tests)
+pretrain/           # Byte-level and hebrew256 H-Net pretraining, benchmarks, Hebrew LM eval suite, plots
+mi_experiments/     # Interpretability: where the Hebrew H-Net puts chunk boundaries, morphology probing data
+configs/mt/         # MT run configs (run1 subword, run2* H-Net encoder, run3* two-memory variants)
+configs/hnet_2stage_{300M,500M}.json   # pretraining model sizes
+scripts/            # Slurm sbatch jobs and env setup for the TAU cluster (see scripts/mt_env.sh)
+```
+
+Local-only (git-ignored): `data/`, `datasets/`, `runs/` (checkpoints and logs), `.mt_env/`, `.bench_env/`, `.build/`, `reports/`, `paper/`.
+
+Run modules from the repo root, e.g. `python -m mt.train --config configs/mt/run1_subword.json --out runs/run1`, or submit through the matching `scripts/*.sbatch`.
+
+---
+
 # H-Net
 
 <table width="100%">
