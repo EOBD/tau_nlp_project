@@ -52,6 +52,7 @@ import json
 import os
 import random
 import time
+import traceback
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -74,6 +75,7 @@ NGRAM_DIM = 4096
 MAX_TOKENS_PER_LEMMA_ROOTS = 20
 N_PAIRS = 200_000
 SURFACE_BINS = 40  # the n-gram baseline scores ~0.53 root AUC with this, keeping ~95% of same-root pairs
+F16_MAX = 65000.0  # features are stored as float16; larger values are clipped and counted in diagnostics
 
 
 # ============================================================================================ model and hooks
@@ -222,6 +224,9 @@ def extract(args, spec, rows):
                                                       (N, acts[k.rsplit(".", 1)[0]].shape[1]))
                     valid[k] = np.zeros(N, bool)
                 if v is not None:
+                    if not np.abs(v).max() <= F16_MAX:  # would overflow float16 to inf (or is already inf/nan)
+                        diag[f"clipped:{k}"] += 1
+                        v = np.clip(np.nan_to_num(v), -F16_MAX, F16_MAX)
                     mm[k][i] = v
                     valid[k][i] = True
             # alignment diagnostics: is the host's word start / end a chunk start?
@@ -580,7 +585,11 @@ def report(args, names, rows):
     for n in names:
         m = json.load(open(os.path.join(args.out, "feats", n, "meta.json")))
         d = m["diagnostics"]
-        L.append(f"- **{n}**: " + ", ".join(f"{k} {d[k] / d['tokens']:.3f}" for k in sorted(d) if k != "tokens"))
+        L.append(f"- **{n}**: " + ", ".join(f"{k} {d[k] / d['tokens']:.3f}" for k in sorted(d)
+                                            if k != "tokens" and not k.startswith("clipped:")))
+        clipped = {k.split(":", 1)[1]: v for k, v in d.items() if k.startswith("clipped:")}
+        L.append(f"  - tokens with a value clipped to the float16 range: "
+                 + (", ".join(f"{k} {v}" for k, v in sorted(clipped.items())) if clipped else "none"))
     L.append("\n## Example chunkings (trained model)\n")
     for e in meta["examples"][:15]:
         L.append(f"- `{e['host']}` in `{e['s2_chunks']}` → cur `{e['cur_s2']}`, next `{e['next_s2']}`")
@@ -612,15 +621,27 @@ def main():
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     stages = args.stages.split(",")
+    failed = []
     if "extract" in stages:
-        for s in specs:
-            extract(args, s, rows)
+        for s in specs:  # a failure in one model (e.g. the random one) must not cost the others their results
+            try:
+                extract(args, s, rows)
+            except Exception:
+                traceback.print_exc()
+                print(f"[extract] {model_name(s)} FAILED; continuing without it", flush=True)
+                failed.append(model_name(s))
+                torch.cuda.empty_cache()
+    names = [n for n in names if os.path.exists(os.path.join(args.out, "feats", n, "DONE"))]
+    if not names:
+        raise SystemExit("no model has extracted features")
     if "probe" in stages:
         probe_stage(args, names, rows)
     if "roots" in stages:
         roots_stage(args, names, rows)
     if "report" in stages:
         report(args, names, rows)
+    if failed:
+        raise SystemExit(f"extraction failed for {failed}; see the traceback above")
 
 
 if __name__ == "__main__":
