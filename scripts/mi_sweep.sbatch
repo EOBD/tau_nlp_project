@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=killable
 #SBATCH --account=gpu-research
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=06:00:00
@@ -18,8 +18,9 @@
 #   sbatch ... mi_sweep.sbatch --model trained=runs/pretrain/h300m_he/model.pt --model random \
 #                              --model predecay=runs/pretrain/h300m_he/pre_decay_model.pt
 #
-# Any Ampere+ GPU works (the model is 300M params, peak memory a few GB), so no GPU type is requested: 3090, A5000,
-# A6000 and L40S are all fine. Expected: ~15 min extraction + ~20 min probing; disk ~10 GB in runs/mi/sweep/feats.
+# Needs an Ampere+ GPU (flash-attn; mamba/triton kernels). killable also has RTX 2080 / V100 / Quadro nodes, where the
+# job hangs before the first sentence, so the type is pinned. If L40S is busy, geforce_rtx_3090, a5000 or a6000 also
+# work: sbatch --gres=gpu:geforce_rtx_3090:1 ... Expected: ~15 min extraction + ~20 min probing; ~10 GB of disk.
 # Preemption is safe: the job requeues and every stage skips what is already on disk.
 # Check: squeue --me    Log: runs/mi/logs/mi_sweep-<jobid>.out
 source /home/morg/NLP_2526b/tomshabtay/tau_nlp_project/scripts/mt_env.sh  # cd's into the repo
