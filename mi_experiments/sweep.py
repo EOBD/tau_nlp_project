@@ -231,7 +231,7 @@ def extract(args, spec, rows):
                 diag[f"{st}_boundary_at_host_start"] += (r["host_start"] + 1) in ss
                 diag[f"{st}_boundary_right_after_word"] += (r["end"] + 1) in ss
                 diag[f"{st}_boundary_at_char_after_space"] += (r["end"] + 2) in ss
-                diag[f"{st}_next_missing"] += np.searchsorted(starts, r["end"], side="right") >= len(starts)
+                diag[f"{st}_next_missing"] += bool(np.searchsorted(starts, r["end"], side="right") >= len(starts))
             diag["tokens"] += 1
             if len(examples) < 25 and random.Random(i).random() < 0.01:
                 examples.append({"text": text, "word": r["word"], "host": text[r["host_start"]:r["host_end"]],
@@ -248,7 +248,7 @@ def extract(args, spec, rows):
     np.save(os.path.join(d, "valid.npy"), np.stack([valid[k] for k in sorted(valid)]))
     with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
         json.dump({"sites": sites, "keys": sorted(valid), "spec": spec, "diagnostics": diag, "examples": examples},
-                  f, ensure_ascii=False, indent=1)
+                  f, ensure_ascii=False, indent=1, default=lambda o: o.item())  # numpy scalars
     open(os.path.join(d, "DONE"), "w").close()
     for h in rec.hooks:
         h.remove()
