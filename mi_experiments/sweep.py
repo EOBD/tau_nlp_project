@@ -21,10 +21,17 @@ Readouts: one vector per verb token and site. The model is causal and a chunk's 
 FIRST character, so the chunk containing a word has in general not seen all of it:
   char sites   last  = state at the verb host's last character (has seen the whole word)
                mean  = mean over the host's characters
+               after = state at the character right after the word (usually the space), the char-level
+                       counterpart of `next`. Missing at the end of a sentence.
   chunk sites  cur   = the chunk containing the host's last character (partial view of the word)
                next  = the first chunk starting after the whole whitespace word (has seen all of it, plus usually
                        the space / next character). Missing at the end of a sentence: those tokens are dropped.
 Each model uses its own boundaries (the random model's router chunks differently).
+
+Isolated words (on by default, --no-iso to skip): every verb host is also run alone, as the text "<host> ." with no
+sentence around it (one forward per unique host form), and saved as model "<name>_iso" with one row per token, so
+every stage runs on it unchanged. Contextual vs isolated = what the sentence contributes. The prefix letters (ש, ו,
+...) are not part of the host, so they are dropped too. Homographs of different lemmas get identical vectors.
 
 Probes (stage "probe"): multinomial logistic regression on standardized features, full batch L-BFGS on the GPU, L2
 picked on dev from L2_GRID, trained on morph_split=train, scored on test: accuracy, macro-F1, and both per slice
@@ -42,6 +49,8 @@ letters), while surface binning brings it to ~0.53. So ~0.5 = nothing beyond the
 morphological cell > different cell) among different-root pairs as the pattern counterpart.
 
 Outputs in <out>: feats/<model>/<site>.<readout>.npy (float16, one row per kept token), feats/<model>/valid.npy,
+feats/<model>/positions.npy (int32, one row per token, columns POS_COLS: sequence positions = char index + 1, of the
+host span, the word end, and the start of the cur / next chunk at stage 1 and 2; -1 = no such chunk),
 tokens.jsonl (the token rows, same order), results/<model>/probe.<site>.<readout>.json, results/<model>/roots.json,
 diagnostics.json, report.md.
 """
@@ -75,6 +84,8 @@ NGRAM_DIM = 4096
 MAX_TOKENS_PER_LEMMA_ROOTS = 20
 N_PAIRS = 200_000
 SURFACE_BINS = 40  # the n-gram baseline scores ~0.53 root AUC with this, keeping ~95% of same-root pairs
+POS_COLS = ("host_start", "host_end", "end", "s1_cur", "s1_next", "s2_cur", "s2_next")
+ISO_SUFFIX = " ."
 F16_MAX = 65000.0  # features are stored as float16; larger values are clipped and counted in diagnostics
 
 
@@ -173,6 +184,7 @@ def token_vectors(acts, s1, s2, r, sites):
         if res == "char":
             out[f"{site}.last"] = a[last]
             out[f"{site}.mean"] = a[hs:he].mean(0)
+            out[f"{site}.after"] = a[end] if end < a.shape[0] else None
             continue
         starts = s1 if res == "s1" else s2
         assert a.shape[0] == len(starts), (site, a.shape, len(starts))
@@ -180,6 +192,17 @@ def token_vectors(acts, s1, s2, r, sites):
         nxt = np.searchsorted(starts, end - 1, side="right")  # first chunk starting at position >= end
         out[f"{site}.cur"] = a[cur]
         out[f"{site}.next"] = a[nxt] if nxt < len(starts) else None
+    return out
+
+
+def token_positions(s1, s2, r):
+    """One POS_COLS row: where the readouts of token_vectors come from."""
+    last, end = r["host_end"], r["end"] + 1
+    out = [r["host_start"] + 1, r["host_end"] + 1, end]
+    for starts in (s1, s2):
+        cur = np.searchsorted(starts, last, side="right") - 1
+        nxt = np.searchsorted(starts, end - 1, side="right")
+        out += [int(starts[cur]), int(starts[nxt]) if nxt < len(starts) else -1]
     return out
 
 
@@ -193,8 +216,9 @@ def load_tokens(data):
     return rows
 
 
-def extract(args, spec, rows):
-    name = model_name(spec)
+def extract(args, spec, rows, iso=False):
+    """iso: run every verb host alone (see the module docstring) and save it as <name>_iso."""
+    name = model_name(spec) + ("_iso" if iso else "")
     d = os.path.join(args.out, "feats", name)
     if os.path.exists(os.path.join(d, "DONE")):
         print(f"[extract] {name}: done already")
@@ -206,8 +230,14 @@ def extract(args, spec, rows):
     tok = Tokenizer(os.path.join(ROOT, "datasets", "pretraining", "hebrew256"))
     by_text = defaultdict(list)
     for i, r in enumerate(rows):
-        by_text[r["text"]].append(i)
+        if iso:
+            h = r["text"][r["host_start"]:r["host_end"]]
+            by_text[h + ISO_SUFFIX].append((i, {"word": h, "start": 0, "end": len(h), "host_start": 0,
+                                                "host_end": len(h)}))
+        else:
+            by_text[r["text"]].append((i, r))
     N = len(rows)
+    pos = np.full((N, len(POS_COLS)), -1, np.int32)
     mm, valid = {}, {}
     diag = Counter()
     examples = []
@@ -215,9 +245,11 @@ def extract(args, spec, rows):
     for n_sent, (text, idx) in enumerate(by_text.items()):
         acts, s1, s2 = run_sentence(model, rec, tok, text)
         acts = {k: v.cpu().numpy() for k, v in acts.items()}
-        for i in idx:
-            r = rows[i]
+        for i, r in idx:
+            pos[i] = token_positions(s1, s2, r)
             vecs = token_vectors(acts, s1, s2, r, sites)
+            if args.readouts and not iso:
+                vecs = {k: v for k, v in vecs.items() if k.rsplit(".", 1)[1] in args.readouts.split(",")}
             for k, v in vecs.items():
                 if k not in mm:
                     mm[k] = np.lib.format.open_memmap(os.path.join(d, f"{k}.npy.part"), "w+", np.float16,
@@ -251,8 +283,10 @@ def extract(args, spec, rows):
     for k in valid:
         os.replace(os.path.join(d, f"{k}.npy.part"), os.path.join(d, f"{k}.npy"))
     np.save(os.path.join(d, "valid.npy"), np.stack([valid[k] for k in sorted(valid)]))
+    np.save(os.path.join(d, "positions.npy"), pos)
     with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"sites": sites, "keys": sorted(valid), "spec": spec, "diagnostics": diag, "examples": examples},
+        json.dump({"sites": sites, "keys": sorted(valid), "spec": spec, "iso": iso, "position_columns": POS_COLS,
+                   "diagnostics": diag, "examples": examples},
                   f, ensure_ascii=False, indent=1, default=lambda o: o.item())  # numpy scalars
     open(os.path.join(d, "DONE"), "w").close()
     for h in rec.hooks:
@@ -544,8 +578,9 @@ def report(args, names, rows):
     keys = meta["keys"]
     order = {s: i for i, s in enumerate(meta["sites"])}
     keys = sorted(keys, key=lambda k: (order[k.rsplit(".", 1)[0]], k))
-    for ro_pair in (("last", "cur"), ("mean", "next")):
-        L.append(f"\n## Morphology probes, readout {ro_pair[0]} (char sites) / {ro_pair[1]} (chunk sites)\n")
+    for ro_pair in (("last", "cur"), ("mean", "next"), ("after",)):
+        L.append(f"\n## Morphology probes, readout {ro_pair[0]} (char sites)"
+                 + (f" / {ro_pair[1]} (chunk sites)\n" if len(ro_pair) > 1 else "\n"))
         hdr = "| site | " + " | ".join(f"{t}" + (" (sel)" if other else "") for t in TASKS) + \
               " | binyan amb/unamb | binyan HTB/IAHLT |"
         L += [hdr, "|" + "---|" * (len(TASKS) + 3)]
@@ -565,6 +600,21 @@ def report(args, names, rows):
             b = a["binyan"] or {}
             cells.append(f"{fmt(b.get('acc_ambiguous'))}/{fmt(b.get('acc_unambiguous'))}")
             cells.append(f"{fmt(b.get('acc_HTB'))}/{fmt(b.get('acc_IAHLT'))}")
+            L.append(f"| {k} | " + " | ".join(cells) + " |")
+    iso = f"{trained}_iso"
+    if os.path.exists(os.path.join(rd, iso)):
+        L.append(f"\n## In context vs isolated word ({trained}): test acc in context / alone, and the difference\n")
+        L.append("Isolated = the host alone as \"<host> .\". Binyan on ambiguous forms is where context should matter.\n")
+        L += ["| site | " + " | ".join(TASKS) + " | binyan ambiguous |", "|" + "---|" * (len(TASKS) + 2)]
+        for k in keys:
+            fa, fb = (os.path.join(rd, n, f"probe.{k}.json") for n in (trained, iso))
+            if k.rsplit(".", 1)[1] not in ("last", "after", "next") or not os.path.exists(fb):
+                continue
+            a, b = json.load(open(fa)), json.load(open(fb))
+            cells = [f"{a[t]['acc']:.3f} / {b[t]['acc']:.3f} ({a[t]['acc'] - b[t]['acc']:+.2f})"
+                     if a[t] and b[t] else "-" for t in TASKS]
+            x, y = (a["binyan"] or {}).get("acc_ambiguous"), (b["binyan"] or {}).get("acc_ambiguous")
+            cells.append(f"{x:.3f} / {y:.3f} ({x - y:+.2f})" if x is not None and y is not None else "-")
             L.append(f"| {k} | " + " | ".join(cells) + " |")
     L.append("\n## Roots: AUC(same root > different root), cosine, within bins of n-gram surface similarity\n")
     L.append("0.5 = nothing beyond what the letters give. Weak = heldout root classes. Last column: same "
@@ -610,9 +660,13 @@ def main():
     ap.add_argument("--stages", default="extract,probe,roots,report")
     ap.add_argument("--limit", type=int, default=0, help="only the first N tokens (smoke test)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-iso", action="store_true", help="skip the isolated-word extraction")
+    ap.add_argument("--readouts", default="", help="contextual extraction saves only these readouts (e.g. 'after'); "
+                                                    "the isolated extraction always saves all")
     args = ap.parse_args()
     specs = args.model or ["trained=runs/pretrain/h300m_he/model.pt", "random"]
-    names = [model_name(s) for s in specs]
+    runs = [(s, False) for s in specs] + ([] if args.no_iso else [(s, True) for s in specs])
+    names = [model_name(s) + ("_iso" if iso else "") for s, iso in runs]
     os.makedirs(args.out, exist_ok=True)
     rows = load_tokens(args.data)
     if args.limit:
@@ -623,13 +677,13 @@ def main():
     stages = args.stages.split(",")
     failed = []
     if "extract" in stages:
-        for s in specs:  # a failure in one model (e.g. the random one) must not cost the others their results
+        for (s, iso), n in zip(runs, names):  # a failure in one model must not cost the others their results
             try:
-                extract(args, s, rows)
+                extract(args, s, rows, iso=iso)
             except Exception:
                 traceback.print_exc()
-                print(f"[extract] {model_name(s)} FAILED; continuing without it", flush=True)
-                failed.append(model_name(s))
+                print(f"[extract] {n} FAILED; continuing without it", flush=True)
+                failed.append(n)
                 torch.cuda.empty_cache()
     names = [n for n in names if os.path.exists(os.path.join(args.out, "feats", n, "DONE"))]
     if not names:
