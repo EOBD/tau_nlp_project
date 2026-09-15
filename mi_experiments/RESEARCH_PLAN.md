@@ -20,6 +20,41 @@ log (§7) after every run.
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
 paired contrasts), E2, E3b, E3c, E4b, E4 preposition breakdown. Reported as limitations.
 
+### Findings so far (2026-10-03, after E0 and E1)
+
+**Headline claim (reframed):** a character-level language model with learned chunking, never told what a root is,
+learns to organise Hebrew verbs by root in its main network. The root is already spelled out in the letters, so the
+model does not create root knowledge. Its main network compresses each word towards its root while the pattern and
+other form detail fade, and pattern information travels separately on the skip path to the decoder.
+
+| finding | evidence (AUC, strong / weak or test / heldout, 95% CI over roots) | strength |
+|---|---|---|
+| Training makes the model group words by root | E0: trained `m.L4.next` .92 / .83 vs random .48 / .49; difference +.45 [.41, .48] / +.34 [.29, .39] | strong |
+| The main network increases how much the root dominates similarity | E0: `m.L4` − `m.in` +.118 [.102, .136] / +.104 [.079, .130] | strong |
+| ...without adding root information, while form and pattern detail fade: **compression towards the root** | E1: supervised availability `m.L4` − `m.in` −.032 [−.064, −.004] (heldout, 2-D); E0 pattern (cell) AUC falls `m.in` .84 → `m.L4` .75 → `m.out` .60 | new, from E1 |
+| Root and pattern take different paths into the decoder | E0: root `dechunk` − `resid` +.078 [.051, .108]; pattern `resid` − `dechunk` +.254 [.230, .276]. E1: `resid` keeps more recoverable root information (−.135 [−.179, −.097]), i.e. `resid` is form-rich, `dechunk` root-salient | strong |
+| No root information beyond the letters (H2 not supported) | E1: best site `e1.L0` beats the n-gram LDA (+.076 [.036, .118] heldout, 2-D) but not `e0.emb.mean` (+.020 [−.016, .053]); no weak class passes the criterion | conclusive for this test |
+
+**Availability vs salience.** E1 measures *availability*: can a trained probe recover the root? Any representation
+computed from the letters has the root available, because the root is (almost) a function of the letters. A
+representation cannot hold more information about it than its input (data-processing inequality), so H2 as
+formulated could hardly have succeeded. That is a design flaw of H2, not a lost finding. E0 measures *salience*:
+without training, does the representation's own geometry group same-root words? Letters' geometry barely does (.60
+under the 2-D control); the trained main network does strongly (.92); a random network does not (.48). The claim is
+about salience: how the model organises information it necessarily has.
+
+**Wherever salience rises, availability falls or stays flat** (main network: E0 +.12, E1 −.03; decoder paths: E0
+dechunk > resid, E1 resid > dechunk). Early layers and the skip path carry the full word form, so the root is
+recoverable there but is not what makes vectors similar. The main network and `dechunk` discard form detail and
+keep the root as the main axis of similarity.
+
+**What could still weaken the claim:**
+- *Context:* same-root verbs may be grouped because they occur in similar sentences. Sweep v2 (`trained_iso`) tests this.
+- *Absolute numbers:* the 2-D control leaks (letters-only .57–.62), so claims rest on paired contrasts (trained vs
+  random, site vs site), not on distance from 0.5. Coverage is .28–.40 (strong / test) and .55 (weak / heldout).
+- *Use:* everything so far is representational. E4 tests whether the model relies on the root direction for prediction.
+- *Generality:* one model, one language, one training run, verbs only.
+
 ### Why each remaining experiment is needed
 
 Each step rules out one alternative explanation that the earlier ones leave open.
@@ -66,6 +101,10 @@ Hypotheses as falsifiable claims:
 | H2 (RQ1) | The root code is abstract: it transfers from strong to weak roots | A root metric fit on strong roots does not beat the letter floor on held-out weak roots |
 | H3 (RQ2) | Root and pattern are routed separately (`d1.dechunk` vs `d1.resid`) and are linearly separable | No dissociation once CIs are added, or no additive root × pattern structure |
 | H4 (RQ3) | The root code is causally used for prediction after the verb | Ablating it hurts next-word loss no more than a random subspace of the same rank |
+
+Status (2026-10-03): **H1** supported as *salience* (root dominates the geometry beyond letters and random,
+paired contrasts) but not as extra information. **H2** not supported (E1, see Findings), and could hardly have been
+under this formulation. **H3** supported for routing (E0 + E1); linear separability (E3b) cut. **H4** pending (E4).
 
 ---
 
@@ -160,7 +199,7 @@ resumable: someone else submits the jobs), outputs in `runs/mi/<name>/`. Reuse `
 `runs/mi/sweep/feats/` where possible. Bootstrap CIs resample **roots**, not pairs or tokens (pairs that share a
 root are not independent). 1,000 resamples, 95% percentile intervals.
 
-### E0. Measurement hardening (prerequisite for RQ1–3) ◐
+### E0. Measurement hardening (prerequisite for RQ1–3) ☑ (v2 sites pending)
 
 - **Goal:** a root-similarity measure that random features cannot pass, with error bars and the missing readout.
 - **Changes:**
@@ -192,7 +231,7 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
     variables are cosines of *standardized* features, edges at same-root quantiles, MIN_N = 20. Only 39% (strong)
     / 55% (weak) of same-root pairs are covered. See §8.
 
-### E1. Supervised root metric, strong → weak transfer (RQ1, H1/H2) ☐ (slimmed: LDA only; sites `e1.L0`, `m.in`, `m.L4`, `d1.dechunk`, `d1.resid`, + `e0.out.after` if sweep v2 exists; the supervised letters-only probe doubles as the letter control)
+### E1. Supervised root metric, strong → weak transfer (RQ1, H1/H2) ☑ (slimmed: LDA only; sites `e1.L0`, `m.in`, `m.L4`, `d1.dechunk`, `d1.resid`, + `e0.out.after` if sweep v2 exists; the supervised letters-only probe doubles as the letter control)
 
 - **Goal:** test whether a root code learned on strong roots identifies weak roots it never saw. Cosine over the
   full vector can hide a small root subspace. A learned projection can't hide it, but it has to generalise.
@@ -257,7 +296,7 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
   `d1.resid`. H3 predicts dechunk patches carry lexeme-dependent continuation preferences (governed prepositions,
   collocates) and resid patches carry form-dependent ones.
 
-### E4. Causal use of the root code (RQ3, H4) ☐ (slimmed: `m.L4.next` only, next-word loss, 10 random-subspace controls; no preposition breakdown, no E4b)
+### E4. Causal use of the root code (RQ3, H4) ☐ (slimmed: `m.L4.next` only, next-word loss, 20 random-subspace controls; no preposition breakdown, no E4b)
 
 - **Goal:** test whether the model needs the root code to predict what follows the verb.
 - **Method:** project the E1 root subspace out of the residual stream at the verb's `next` chunk (`m.L4`, and
