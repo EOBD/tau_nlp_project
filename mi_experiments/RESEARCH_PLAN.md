@@ -14,7 +14,7 @@ log (§7) after every run.
 |---|---|---|---|
 | 1 | E0 on saved features | ☑ | RQ1 (relative), RQ2 dissociation |
 | 2 | Sweep v2, slimmed (trained only, extraction only, ~15 GPU min): `after` readouts, isolated-word features (`trained_iso`), per-token chunk positions; then E0 on 27 new site.readouts appended to `runs/mi/e0` (CPU, 4 tasks) | ☐ submit `bash scripts/mi_submit_v2.sh` (gpu-research account) | RQ1: where the `e1.L0` peak is built; word vs context (root AUC and probes, in context vs alone); filter tokens whose stage-2 `next` saw extra text |
-| 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ◐ job 966212 (CPU) | RQ1/H2, RQ2 (second measure), subspace for E4 |
+| 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ☑ job 966212 (13 min); rerun after sweep v2 adds `after` / iso sites | RQ1/H2, RQ2 (second measure), subspace for E4 |
 | 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☐ code ready; submit after E1 from a gpu-research account | RQ3/H4 |
 
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
@@ -221,6 +221,12 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
     training, its geometry groups same-root words (E0: `m.L4` .92 under the 2-D control), while the letters' own
     geometry does not (letters-only features .60). The claim becomes "the model organises its representation space
     around the root", not "the model holds root information its input lacks".
+  - **Full run (2026-10-03) confirms it and adds a pattern:** wherever E0's *unsupervised* root similarity goes up,
+    E1's *supervised* root availability goes down or stays flat. Main network: E0 +.12, E1 −.03. Decoder paths:
+    E0 dechunk > resid (+.08), E1 resid > dechunk (−.13). Reading: the skip path and early layers carry the full
+    word form, so the root is recoverable there by a trained probe but is not the dominant axis of similarity. The
+    main network and `dechunk` discard form detail (and pattern, E0 cell AUC falls) but keep the root as the main axis
+    of similarity. **The main network does not add root information; it compresses the word towards its root.**
   - The raw (uncontrolled) AUC is at ceiling for letters: most different-root pairs share almost no letters. Only the
     2-D column and the per-class numbers are informative.
 
@@ -297,6 +303,7 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-09-30 | sweep | 956463 | `runs/mi/sweep/report.md` | §3.1 | H1 (suggestive) |
 | 2026-10-01 | sweep checks (scratchpad) | – | not saved | §3.2 items 1–4 | measurement |
 | 2026-10-02 | E0 on sweep features | 963603 (array 0–7, done, ~1 h) | `runs/mi/e0/report.md` | 2-D control, 1000 root resamples. Root AUC strong / weak: e1.L0 .94 / .88, m.in .81 / .73, m.L4 .92 / .83, m.out .82 / .73; random ≤ .50. m.L4 − m.in +.118 [.102, .136] / +.104 [.079, .130]. dechunk − resid (root) +.078 [.051, .108] / +.089 [.049, .129]; resid − dechunk (pattern) +.254 [.230, .276] / +.246 [.225, .268]. Hollow and pe-nun are hardest (e1.L0 .82 / .84, m.L4 .76 / .76) but far above e0.emb.mean (.48 / .40). Caveats: letters-only baseline .60 / .62; coverage .39 / .55 | H1 supported (relative), H3 dissociation supported, H2 suggestive |
+| 2026-10-03 | E1 | 966212 | `runs/mi/e1/report.md` | **H2 criterion not met at any site.** Raw AUC at ceiling (n-gram LDA .993 / .979). Within 2-D bins: e1.L0 .989 / .948 beats the n-gram LDA (+.075 [.019, .111] / +.076 [.036, .118]) but not `e0.emb.mean` (+.057 [−.010, .096] / +.020 [−.016, .053]). Supervised availability *falls* through the main network (m.L4 − m.in, 2-D heldout −.032 [−.064, −.004]; m.out .82, dechunk .81 heldout 2-D) and resid > dechunk (−.135 [−.179, −.097]), the opposite of E0's unsupervised results. Trained ≫ random (m.L4 +.30). 2-D coverage .28 test / .55 heldout | H2 not supported beyond letters; supports availability vs salience (see E1 notes) |
 | 2026-10-02 | sweep v2 + E0 v2 (`after` readout) | not yet submitted | `runs/mi/sweep_v2/`, `runs/mi/e0_v2/` | needs `bash scripts/mi_submit_v2.sh` from a gpu-research account | H1 (where the peak is built) |
 
 ---
