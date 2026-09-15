@@ -14,11 +14,30 @@ log (§7) after every run.
 |---|---|---|---|
 | 1 | E0 on saved features | ☑ | RQ1 (relative), RQ2 dissociation |
 | 2 | Sweep v2, slimmed (trained only, extraction only, ~15 GPU min): `after` readouts, isolated-word features (`trained_iso`), per-token chunk positions; then E0 on 27 new site.readouts appended to `runs/mi/e0` (CPU, 4 tasks) | ☐ submit `bash scripts/mi_submit_v2.sh` (gpu-research account) | RQ1: where the `e1.L0` peak is built; word vs context (root AUC and probes, in context vs alone); filter tokens whose stage-2 `next` saw extra text |
-| 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline | ☐ | RQ1/H2, RQ2 (second measure), subspace for E4 |
-| 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 10 random subspaces | ☐ needs E1 | RQ3/H4 |
+| 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ◐ job 966212 (CPU) | RQ1/H2, RQ2 (second measure), subspace for E4 |
+| 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☐ code ready; submit after E1 from a gpu-research account | RQ3/H4 |
 
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
 paired contrasts), E2, E3b, E3c, E4b, E4 preposition breakdown. Reported as limitations.
+
+### Why each remaining experiment is needed
+
+Each step rules out one alternative explanation that the earlier ones leave open.
+
+| after | what we can claim | still open to |
+|---|---|---|
+| sweep | root / pattern patterns appear across layers | noise, letters, context, unused by-product |
+| E0 ☑ | trained ≫ random; the main network adds root similarity (+.12); root and pattern take different decoder paths (with CIs) | letters (the control leaks), context, by-product |
+| sweep v2 | the root signal is in the word, not its sentence; built in component X (char encoder or stage-1 attention) | letters, by-product |
+| E1 | how much root information is *linearly available* beyond letters, under a supervised letter control; strong → weak transfer | by-product |
+| E4 | the model uses root-discriminative directions to predict upcoming text (or does not) | one model, one site |
+
+- **Sweep v2** answers the context objection (verbs run alone, `trained_iso`) and localises the `e1.L0` peak
+  (`after` readout).
+- **E1** replaces E0's imperfect surface control with a stricter one (a letters-only probe trained the same way)
+  and tests generalisation to weak roots never fitted. It also produces the root subspace for E4.
+- **E4** is the only causal test: everything else measures what is in the vectors, not what the model relies on.
+  Random subspaces of the same rank control for "any edit hurts".
 
 ---
 
@@ -192,6 +211,19 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
   `e0.emb.mean` probe by ≥ .05 with the 95% CI excluding 0, and does so in ≥ 4 of the weak classes with ≥ 30
   same-root pairs.
 
+- **Smoke test (2026-10-03, 20 resamples, 4 sites; full run in job 966212).** Raw AUC test / heldout: n-gram LDA
+  .993 / .979, `e0.emb.mean` .998 / .995, `m.in` .975 / .970, `m.L4` .970 / .938. Within 2-D surface bins: n-gram
+  .913 / .872, `e0.emb.mean` .932 / .928, `m.in` .951 / .922, `m.L4` .949 / .890.
+  **A trained probe identifies roots from letters alone about as well as from the model's vectors, weak roots
+  included.** The H2 criterion will very likely not be met.
+  - **Interpretation, availability vs salience:** root identity is linearly *available* in the input letters, so a
+    supervised probe cannot separate "abstract root" from "letters". What the model adds is *salience*: without any
+    training, its geometry groups same-root words (E0: `m.L4` .92 under the 2-D control), while the letters' own
+    geometry does not (letters-only features .60). The claim becomes "the model organises its representation space
+    around the root", not "the model holds root information its input lacks".
+  - The raw (uncontrolled) AUC is at ceiling for letters: most different-root pairs share almost no letters. Only the
+    2-D column and the per-class numbers are informative.
+
 ### E2. Root vs meaning (RQ1, H1 alternative) ✂
 
 - **Goal:** separate "same root" from "related meaning", since same-root lexemes are often semantically related.
@@ -233,6 +265,15 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
 - **Pre-registered criterion (proposal):** H4 supported if root-subspace ablation raises next-word loss more than
   the 95th percentile of random-subspace ablations, with the effect larger at lexeme-governed positions than
   elsewhere (CI over sentences).
+- **Implementation (2026-10-03):** `mi_experiments/root_ablation.py` edits the output of main-network block L (hook
+  on `(hidden, residual)`) at the stage-2 chunk right after the verb. Conditions: root subspace (E1, rank k), 20
+  random subspaces of the same rank drawn in the standardized space, full replacement by the train mean (upper bound).
+  Records the next-word, rest-of-sentence and before-the-edit NLL changes (the last is a causality check) and the edit
+  norms. `--budget-min` caps GPU time. Tested on CPU: the projection zeroes the root readout, and the report runs on
+  synthetic results. Not yet run on the model.
+- **Caveat (from E1):** the root subspace also carries word-form identity (letters make roots linearly
+  identifiable). A positive result means the model uses root-discriminative directions, not necessarily an abstract
+  root. Compare edit norms: a random subspace may remove less of the vector.
 - **Optional E4b, within-word use:** ablate a character-level root subspace at the verb's own characters
   (`e0`/`d0`) and compare the loss on the remaining root letters vs pattern letters.
 
@@ -272,6 +313,8 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-10-02 | Bootstrap resamples shared across all sites and models (fixed seed) | site-vs-site and trained-vs-random differences get paired CIs |
 | 2026-10-02 | Added to sweep v2: isolated-word extraction (each host alone as "<host> .") and `positions.npy` | the only remaining GPU-only data a later analysis could need: a cheap context control (replaces part of the cut E2) and a way to filter the 7.4% of tokens whose stage-2 `next` chunk does not start right after the word. Identical-host pairs: see the next entry |
 | 2026-10-02 | Slimmed sweep v2: trained model only, extraction only, contextual run saves only `after`; no GPU probes; E0 on selected sites only, appended to `runs/mi/e0`. Identical-host pairs kept (not dropped) | GPU budget ~2 h for v2 + E4 today; sharing the v1 pair sample and resamples keeps contrasts across runs paired. Lost: random-model `after`/iso controls and the context-vs-isolated probe table |
+| 2026-10-03 | E1 primary measure = AUC within the 2-D surface bins (raw AUC kept but at ceiling); claim reframed as salience (E0) vs availability (E1) | supervised letter features identify roots, weak ones included, about as well as the model's vectors (E1 smoke test) |
+| 2026-10-03 | E4: 20 random draws (not 10), full-replacement upper bound, edit norms recorded, GPU budget cap | 95th-percentile criterion needs ≥ 20 draws; norms guard against a "random removes less" artefact |
 | 2026-10-02 | Trimmed scope to §0: keep sweep v2, slim E1 and E4; cut control fix, E2, E3b/c, E4b | time-limited; E1's supervised letters baseline serves as the letter control, E0 already gave E3a |
 
 ## 8. Open questions
