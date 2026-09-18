@@ -15,6 +15,7 @@ log (§7) after every run.
 | 1 | E0 on saved features | ☑ | RQ1 (relative), RQ2 dissociation |
 | 2 | Sweep v2, slimmed (trained only, extraction only, ~15 GPU min): `after` readouts, isolated-word features (`trained_iso`), per-token chunk positions; then E0 on 27 new site.readouts appended to `runs/mi/e0` (CPU, 4 tasks) | ☐ submit `bash scripts/mi_submit_v2.sh` (gpu-research account) | RQ1: where the `e1.L0` peak is built; word vs context (root AUC and probes, in context vs alone); filter tokens whose stage-2 `next` saw extra text |
 | 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ☑ job 966212 (13 min); rerun after sweep v2 adds `after` / iso sites | RQ1/H2, RQ2 (second measure), subspace for E4 |
+| 5 | E5: PCA + variance decomposition at the key sites, trained vs random (`mi_experiments/pca_sites.py`, `scripts/mi_pca.sbatch`) | ☑ job 968065 (CPU, 3 min) | RQ1 / RQ2 from a third angle: what dominates each site's leading directions |
 | 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☐ code ready; submit after E1 from a gpu-research account | RQ3/H4 |
 
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
@@ -47,6 +48,31 @@ about salience: how the model organises information it necessarily has.
 dechunk > resid, E1 resid > dechunk). Early layers and the skip path carry the full word form, so the root is
 recoverable there but is not what makes vectors similar. The main network and `dechunk` discard form detail and
 keep the root as the main axis of similarity.
+
+**E5 (PCA, 2026-10-03) agrees, from a third angle.** Excess share of variance inside the top-10 principal
+components (root and binyan measured across lemmas):
+
+| site | root | binyan | tense | number | gender |
+|---|---|---|---|---|---|
+| m.in.next | .047 | .210 | .206 | .105 | .069 |
+| m.L4.next | **.198** | .142 | .194 | .015 | .009 |
+| m.out.next | .195 | **.040** | .062 | .006 | .003 |
+| d1.dechunk.next | **.221** | .044 | .063 | .006 | .004 |
+| d1.resid.next | .067 | **.247** | .143 | .150 | .113 |
+
+- In the main network the leading directions switch from pattern / inflection to root: root ×4 from `m.in` to
+  `m.L4`, binyan falls ×5 by `m.out`, number and gender almost vanish.
+- `dechunk` is root-dominated, `resid` pattern- and agreement-dominated; in `resid`, PC2 = number (excess eta² .75)
+  and PC3 = gender (.71) are explicit axes.
+- The PC1 × PC2 figure (`runs/mi/pca/figs/pc12_trained.png`) shows clear binyan clusters in `e0.out.mean` and
+  `d1.resid`, fully mixed in `m.out` and `dechunk`.
+- Random model: root share in the main network about .06–.07 (trained .20–.24).
+- **New nuisance finding:** PC1 of `m.L4`, `m.out` and `dechunk` tracks the verb's relative position in the
+  sentence (r = +.74, +.70, −.78). It is unrelated to roots (pairs come from different sentences), so it adds noise
+  to E0's cosines rather than bias; removing it could sharpen E0 (not done).
+- Caveat: these shares have no letter control. Letter-like representations (`e0.emb.mean`, trained or random) give
+  the highest root share over all dimensions (.43). Read E5 only as comparisons within the trained model and
+  against random, like E0.
 
 **What could still weaken the claim:**
 - *Context:* same-root verbs may be grouped because they occur in similar sentences. Sweep v2 (`trained_iso`) tests this.
@@ -346,6 +372,7 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-10-01 | sweep checks (scratchpad) | – | not saved | §3.2 items 1–4 | measurement |
 | 2026-10-02 | E0 on sweep features | 963603 (array 0–7, done, ~1 h) | `runs/mi/e0/report.md` | 2-D control, 1000 root resamples. Root AUC strong / weak: e1.L0 .94 / .88, m.in .81 / .73, m.L4 .92 / .83, m.out .82 / .73; random ≤ .50. m.L4 − m.in +.118 [.102, .136] / +.104 [.079, .130]. dechunk − resid (root) +.078 [.051, .108] / +.089 [.049, .129]; resid − dechunk (pattern) +.254 [.230, .276] / +.246 [.225, .268]. Hollow and pe-nun are hardest (e1.L0 .82 / .84, m.L4 .76 / .76) but far above e0.emb.mean (.48 / .40). Caveats: letters-only baseline .60 / .62; coverage .39 / .55 | H1 supported (relative), H3 dissociation supported, H2 suggestive |
 | 2026-10-03 | E1 | 966212 | `runs/mi/e1/report.md` | **H2 criterion not met at any site.** Raw AUC at ceiling (n-gram LDA .993 / .979). Within 2-D bins: e1.L0 .989 / .948 beats the n-gram LDA (+.075 [.019, .111] / +.076 [.036, .118]) but not `e0.emb.mean` (+.057 [−.010, .096] / +.020 [−.016, .053]). Supervised availability *falls* through the main network (m.L4 − m.in, 2-D heldout −.032 [−.064, −.004]; m.out .82, dechunk .81 heldout 2-D) and resid > dechunk (−.135 [−.179, −.097]), the opposite of E0's unsupervised results. Trained ≫ random (m.L4 +.30). 2-D coverage .28 test / .55 heldout | H2 not supported beyond letters; supports availability vs salience (see E1 notes) |
+| 2026-10-03 | E5 PCA | 968065 | `runs/mi/pca/report.md`, `figs/` | top-10-PC root share m.in .047 → m.L4 .198; binyan .210 → m.out .040; dechunk root .221 / binyan .044, resid root .067 / binyan .247; positional PC1 in m.L4 / m.out / dechunk | H1 (salience), H3 |
 | 2026-10-02 | sweep v2 + E0 v2 (`after` readout) | not yet submitted | `runs/mi/sweep_v2/`, `runs/mi/e0_v2/` | needs `bash scripts/mi_submit_v2.sh` from a gpu-research account | H1 (where the peak is built) |
 
 ---
