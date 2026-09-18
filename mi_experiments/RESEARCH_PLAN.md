@@ -13,13 +13,48 @@ log (§7) after every run.
 | step | experiment | status | answers |
 |---|---|---|---|
 | 1 | E0 on saved features | ☑ | RQ1 (relative), RQ2 dissociation |
-| 2 | Sweep v2, slimmed (trained only, extraction only, ~15 GPU min): `after` readouts, isolated-word features (`trained_iso`), per-token chunk positions; then E0 on 27 new site.readouts appended to `runs/mi/e0` (CPU, 4 tasks) | ☐ submit `bash scripts/mi_submit_v2.sh` (gpu-research account) | RQ1: where the `e1.L0` peak is built; word vs context (root AUC and probes, in context vs alone); filter tokens whose stage-2 `next` saw extra text |
-| 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ☑ job 966212 (13 min); rerun after sweep v2 adds `after` / iso sites | RQ1/H2, RQ2 (second measure), subspace for E4 |
+| 2 ☑ | Sweep v2, slimmed (trained only, extraction only, ~15 GPU min): `after` readouts, isolated-word features (`trained_iso`), per-token chunk positions; then E0 on 27 new site.readouts appended to `runs/mi/e0` (CPU, 4 tasks) | ☑ jobs 968021 (GPU, 22 min) + 968022 (E0, CPU) | RQ1: where the `e1.L0` peak is built; word vs context (root AUC and probes, in context vs alone); filter tokens whose stage-2 `next` saw extra text |
+| 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ☑ jobs 966212 + 968153 (with `after` / iso sites) | RQ1/H2, RQ2 (second measure), subspace for E4 |
 | 5 | E5: PCA + variance decomposition at the key sites, trained vs random (`mi_experiments/pca_sites.py`, `scripts/mi_pca.sbatch`) | ☑ job 968065 (CPU, 3 min) | RQ1 / RQ2 from a third angle: what dominates each site's leading directions |
-| 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☐ code ready; submit after E1 from a gpu-research account | RQ3/H4 |
+| 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☑ job 968023 (GPU, 33 min, 2000 verbs) | RQ3/H4 |
 
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
 paired contrasts), E2, E3b, E3c, E4b, E4 preposition breakdown. Reported as limitations.
+
+### Final results (2026-10-03): sweep v2, E4, E1 rerun
+
+**H4 (use) supported, with a size caveat.** Removing E1's root subspace (rank 64) from `m.L4` at the chunk after
+the verb raises next-word loss by +.040 [.035, .046] nats/char; random subspaces of the same rank +.0046 (20 draws,
+range .0032–.0066). Root − mean random = +.036 [.031, .041]; the root edit beats all 20 draws. Removing the whole
+vector: +.269. Checks: position cosine median 1.000 (min .996); loss before the edit unchanged (max change 0).
+- **By root split:** train roots (whose tokens fitted the subspace) +.072 [.060, .086]; unseen strong roots (test)
+  +.015 [.005, .026]; weak roots (heldout) +.017 [.012, .022]. Report the held-out numbers. The effect generalises
+  to roots the subspace never saw, but is 4–5× smaller than on fitted roots, so part of the subspace encodes
+  specific known words.
+- **Size caveat:** the root edit changes the vector more than a random one (‖edit‖ 14.0 vs 8.5). Even if damage
+  scaled linearly with edit size (random ×1.65 ≈ .0076), the held-out root effect (.0215) is ~2.8× larger. A
+  size-matched control (random directions from the data's high-variance subspace) was not run.
+
+**Context (sweep v2 isolated words): the core findings survive without any sentence.** Paired contrasts on
+`trained_iso` (verbs alone as "<verb> ."), strong / weak:
+- main network adds root similarity: `m.L4` − `m.in` +.088 [.071, .106] / +.067 [.042, .090] (in context
+  +.118 / +.104). About 70% survives without context; context adds +.040 [.022, .057] / +.062 [.036, .088] at
+  `m.L4`.
+- decoder split: root `dechunk` − `resid` +.137 [.110, .167] / +.115 [.074, .156]; pattern `resid` − `dechunk`
+  +.125 [.108, .142] / +.130 [.107, .151].
+- `e1.L0` is context-invariant: in context vs alone −.002 [−.008, .005] / +.008 [−.002, .018].
+
+**Where the `e1.L0` peak is built (`after` readout).** The character encoder's state at the space after the word:
+in context .839 / .813, far below `e1.L0` (−.103 [−.120, −.088] / −.065 [−.091, −.039]). Alone .925 / .868, about
+equal to `e1.L0` (+.019 [.010, .030] / +.001 [−.015, .017]). So the character encoder builds a root-like summary of
+the word, but in running text its state is diluted by the preceding context (in context − alone −.086 [−.103,
+−.070] / −.056 [−.075, −.038]). The stage-1 attention layer (`e1.L0`) restores a context-independent word summary.
+E1: supervised availability at `e0.out.after` .936 (heldout, 2-D), slightly below `e1.L0` .948.
+
+**Updated headline:** the character encoder summarises each word at its boundary; the stage-1 attention layer makes
+that summary independent of the preceding context; the main network compresses it towards the root (partly helped
+by context), while the pattern travels on the skip path; and the model uses the root direction to predict the next
+word, including for roots it was never fitted on.
 
 ### Findings so far (2026-10-03, after E0 and E1)
 
@@ -130,7 +165,8 @@ Hypotheses as falsifiable claims:
 
 Status (2026-10-03): **H1** supported as *salience* (root dominates the geometry beyond letters and random,
 paired contrasts) but not as extra information. **H2** not supported (E1, see Findings), and could hardly have been
-under this formulation. **H3** supported for routing (E0 + E1); linear separability (E3b) cut. **H4** pending (E4).
+under this formulation. **H3** supported for routing (E0 + E1 + E5, also without context); linear separability (E3b) cut. **H4** supported
+(E4: root − random +.036 [.031, .041]; held-out roots +.015–.017), with the edit-size caveat.
 
 ---
 
@@ -373,7 +409,9 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-10-02 | E0 on sweep features | 963603 (array 0–7, done, ~1 h) | `runs/mi/e0/report.md` | 2-D control, 1000 root resamples. Root AUC strong / weak: e1.L0 .94 / .88, m.in .81 / .73, m.L4 .92 / .83, m.out .82 / .73; random ≤ .50. m.L4 − m.in +.118 [.102, .136] / +.104 [.079, .130]. dechunk − resid (root) +.078 [.051, .108] / +.089 [.049, .129]; resid − dechunk (pattern) +.254 [.230, .276] / +.246 [.225, .268]. Hollow and pe-nun are hardest (e1.L0 .82 / .84, m.L4 .76 / .76) but far above e0.emb.mean (.48 / .40). Caveats: letters-only baseline .60 / .62; coverage .39 / .55 | H1 supported (relative), H3 dissociation supported, H2 suggestive |
 | 2026-10-03 | E1 | 966212 | `runs/mi/e1/report.md` | **H2 criterion not met at any site.** Raw AUC at ceiling (n-gram LDA .993 / .979). Within 2-D bins: e1.L0 .989 / .948 beats the n-gram LDA (+.075 [.019, .111] / +.076 [.036, .118]) but not `e0.emb.mean` (+.057 [−.010, .096] / +.020 [−.016, .053]). Supervised availability *falls* through the main network (m.L4 − m.in, 2-D heldout −.032 [−.064, −.004]; m.out .82, dechunk .81 heldout 2-D) and resid > dechunk (−.135 [−.179, −.097]), the opposite of E0's unsupervised results. Trained ≫ random (m.L4 +.30). 2-D coverage .28 test / .55 heldout | H2 not supported beyond letters; supports availability vs salience (see E1 notes) |
 | 2026-10-03 | E5 PCA | 968065 | `runs/mi/pca/report.md`, `figs/` | top-10-PC root share m.in .047 → m.L4 .198; binyan .210 → m.out .040; dechunk root .221 / binyan .044, resid root .067 / binyan .247; positional PC1 in m.L4 / m.out / dechunk | H1 (salience), H3 |
-| 2026-10-02 | sweep v2 + E0 v2 (`after` readout) | not yet submitted | `runs/mi/sweep_v2/`, `runs/mi/e0_v2/` | needs `bash scripts/mi_submit_v2.sh` from a gpu-research account | H1 (where the peak is built) |
+| 2026-10-03 | sweep v2 (extraction) + E0 on it | 968021, 968022 | `runs/mi/sweep_v2/feats/`, `runs/mi/e0/report.md` | e0.out.after .839 / .813 in context, .925 / .868 alone; e1.L0 context-invariant; iso m.L4 − m.in +.088 / +.067; decoder split holds alone | H1, H3, context objection |
+| 2026-10-03 | E4 | 968023 | `runs/mi/e4/report.md`, `tokens.jsonl` | root +.040, random +.0046, full +.269; root − random +.036 [.031, .041]; held-out roots +.015–.017; ‖edit‖ 14.0 vs 8.5 | H4 supported (size caveat) |
+| 2026-10-03 | E1 rerun (`after`, iso sites) | 968153 | `runs/mi/e1/report.md` | e0.out.after .936, iso e1.L0 .947, iso m.L4 .913 (heldout 2-D); criterion still not met anywhere | H2 |
 
 ---
 
@@ -395,6 +433,9 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 
 ## 8. Open questions
 
+- **Next steps that would strengthen the results** (not run, 2026-10-03): (1) size-matched E4 control (random
+  directions from the high-variance subspace) and a binyan-subspace control, GPU ~20–30 min; (2) governed-preposition
+  breakdown of E4 from the saved per-char data, CPU; (3) E0 with the positional PC removed (E5), CPU.
 - **The 2-D surface control leaves letter-only features at .57–.62, not .50** (E0 full run). Not fixed (scope cut); report as a limitation. Options:
   finer grid (with lower coverage), raw instead of standardized letter counts, or replace bin matching with a
   regression / matched-pair design on surface features. Until this is settled, compare sites with each other and
