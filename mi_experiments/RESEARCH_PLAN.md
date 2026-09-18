@@ -314,7 +314,10 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
   on `(hidden, residual)`) at the stage-2 chunk right after the verb. Conditions: root subspace (E1, rank k), 20
   random subspaces of the same rank drawn in the standardized space, full replacement by the train mean (upper bound).
   Records the next-word, rest-of-sentence and before-the-edit NLL changes (the last is a causality check) and the edit
-  norms. `--budget-min` caps GPU time. Tested on CPU: the projection zeroes the root readout, and the report runs on
+  norms. `--budget-min` caps GPU time. Position check: the intercepted vector is compared with the sweep's saved
+  `m.L4.next` (cosine ≈ 1 expected; flagged in the report otherwise). Per verb it also keeps the next word, its
+  clean per-char NLL and the per-char change of the root / full / mean-random edits, so the cut governed-preposition
+  breakdown can be done later on CPU. Tested on CPU: the projection zeroes the root readout, and the report runs on
   synthetic results. Not yet run on the model.
 - **Caveat (from E1):** the root subspace also carries word-form identity (letters make roots linearly
   identifiable). A positive result means the model uses root-discriminative directions, not necessarily an abstract

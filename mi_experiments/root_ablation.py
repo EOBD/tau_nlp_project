@@ -19,6 +19,11 @@ percentile of 20) and the paired 95% CI of (root - mean random) excludes 0.
 Caveat from E1: letters alone make roots linearly identifiable, so the root subspace also carries word-form identity.
 A positive result means the model uses root-discriminative directions, not necessarily an abstract root.
 
+Position check: the vector the hook intercepts is compared with the sweep's saved m.L<layer>.next vector of the same
+verb (cosine, should be ~1; float16 storage), so an off-by-one in the edited position cannot go unnoticed.
+Kept per verb for later CPU analyses (e.g. governed prepositions): the next word, its clean per-char NLL, and the
+per-char NLL change of the root, full and mean-random edits.
+
 Outputs in <out>: tokens.jsonl (one line per verb, appended as it goes, so a rerun resumes), report.md.
 """
 
@@ -51,7 +56,7 @@ class Editor:
     """Forward hook on one main-network block: adds (fn(x) - x) to the residual stream x at chunk `idx`."""
 
     def __init__(self, layer):
-        self.edit, self.norm = None, None
+        self.edit, self.norm, self.x = None, None, None
         layer.register_forward_hook(self.hook)
 
     def hook(self, mod, inp, out):
@@ -61,7 +66,7 @@ class Editor:
         h, res = out
         x = (h[0] if h.dim() == 3 else h)[idx].float() + (res[0] if res.dim() == 3 else res)[idx].float()
         delta = fn(x) - x
-        self.norm = delta.norm().item()
+        self.norm, self.x = delta.norm().item(), x
         h = h.clone()
         hv = h[0] if h.dim() == 3 else h
         hv[idx] = (hv[idx].float() + delta).to(h.dtype)
@@ -152,6 +157,11 @@ def report(args, T):
         d, dci = boot_mean(diff[m], np.array(sent)[m])
         L.append(f"| {sp} | {m.sum()} | {root_next[m].mean():+.4f} | {rand_next[m].mean():+.4f} "
                  f"| {d:+.4f} [{dci[0]:+.4f}, {dci[1]:+.4f}] |")
+    pc = np.array([t["pos_check_cos"] for t in T if "pos_check_cos" in t])
+    if len(pc):
+        L.append(f"\nPosition check (cosine of the intercepted vector with the sweep's saved {args.site_name}): median "
+                 f"{np.median(pc):.4f}, min {pc.min():.4f}, {np.mean(pc > 0.99):.1%} above 0.99. "
+                 + ("OK." if np.median(pc) > 0.99 else "**MISMATCH: the edit may be at the wrong position.**"))
     late = np.array([t["chunk_offset"] > 0 for t in T])
     L.append(f"\n{late.mean():.1%} of verbs have their edited chunk start later than right after the word.")
     with open(os.path.join(args.out, "report.md"), "w", encoding="utf-8") as f:
@@ -172,9 +182,13 @@ def main():
     ap.add_argument("--n-verbs", type=int, default=2000)
     ap.add_argument("--n-random", type=int, default=20)
     ap.add_argument("--budget-min", type=float, default=40, help="stop taking new verbs after this many minutes")
+    ap.add_argument("--sweep", default="runs/mi/sweep", help="saved features for the position check")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     args.site_name = f"m.L{args.layer}.next"
+    fd = os.path.join(args.sweep, "feats", "trained")
+    ref = np.load(os.path.join(fd, f"{args.site_name}.npy"), mmap_mode="r") \
+        if os.path.exists(os.path.join(fd, f"{args.site_name}.npy")) else None
     os.makedirs(args.out, exist_ok=True)
     rows = [json.loads(l) for l in open(args.tokens, encoding="utf-8")]
     cand = [i for i, r in enumerate(rows) if r["root"] and r["binyan"] in BINYANIM and next_word_span(r)]
@@ -220,17 +234,28 @@ def main():
                 continue
             p = int(s2[idx])  # sequence position of the edited chunk's first char; NLL index i is affected iff i >= p
             span = next_word_span(r)
+            s0, s1_ = span
             res = {"i": i, "text_id": text_ids[text], "root_split": r["root_split"], "root_class": r["root_class"],
-                   "chunk_offset": p - (r["end"] + 1), "random": []}
+                   "chunk_offset": p - (r["end"] + 1), "next_word": text[s0:s1_],
+                   "next_nll0": [round(float(v), 4) for v in nll0[s0:s1_]], "random": []}
+            rand_char = []
             for name, fn in edits.items():
                 ed.edit = (idx, fn)
                 nll, _ = forward_nll(model, ids)
                 c = summarize_conditions(nll0, nll, p, span)
                 c["norm"] = ed.norm
+                dchar = nll[s0:s1_] - nll0[s0:s1_]
                 if name.startswith("rand"):
                     res["random"].append(c)
+                    rand_char.append(dchar)
                 else:
                     res[name] = c
+                    res[f"{name}_dchar"] = [round(float(v), 4) for v in dchar]
+                if name == "root" and ref is not None:
+                    v = np.asarray(ref[i], np.float32)
+                    x = ed.x.cpu().numpy()
+                    res["pos_check_cos"] = float(v @ x / (np.linalg.norm(v) * np.linalg.norm(x) + 1e-8))
+            res["random_dchar"] = [round(float(v), 4) for v in np.mean(rand_char, 0)]
             ed.edit = None
             fout.write(json.dumps(res) + "\n")
             fout.flush()
