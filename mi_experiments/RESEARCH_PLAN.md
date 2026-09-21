@@ -17,9 +17,45 @@ log (§7) after every run.
 | 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ☑ jobs 966212 + 968153 (with `after` / iso sites) | RQ1/H2, RQ2 (second measure), subspace for E4 |
 | 5 | E5: PCA + variance decomposition at the key sites, trained vs random (`mi_experiments/pca_sites.py`, `scripts/mi_pca.sbatch`) | ☑ job 968065 (CPU, 3 min) | RQ1 / RQ2 from a third angle: what dominates each site's leading directions |
 | 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☑ job 968023 (GPU, 33 min, 2000 verbs) | RQ3/H4 |
+| 6 | E6: unvocalized ambiguity: probes on contested forms, in context vs isolated, split by subject position (`mi_experiments/ambiguity.py`, `scripts/mi_ambiguity.sbatch`) | ☑ job 968851 (CPU, 4 tasks, 12 min) | RQ4/H5 |
 
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
 paired contrasts), E2, E3b, E3c, E4b, E4 preposition breakdown. Reported as limitations.
+
+### E6 results (2026-10-03): context resolves gender ambiguity, from the main network on
+
+Without vowels one spelling can stand for several cells (רוצה m/f, נעשה 3sg/1pl, נמצא past/present). An isolated
+word, or its letters, can at best give each form its majority reading (the *ceiling*). On **contested** forms
+(seen in UD with >= 2 readings), accuracy above the ceiling must come from context. Full table:
+`runs/mi/ambiguity/report.md`; CIs are a cluster bootstrap over host forms (1000 resamples).
+
+**Gender (1,203 contested tokens, 88 forms): H5 supported.** Criterion met at `m.in`, `m.L4`, `d1.resid`, `d1.in`:
+
+| site | contested acc. | − ceiling | − ngram_ctx | context gain (DiD) | gain, subj before | gain, subj after |
+|---|---|---|---|---|---|---|
+| e1.L0 | .673 | −.058 | +.002 | −.012 | −.034 | +.003 |
+| m.in | .805 | +.073 [.046, .106] | +.133 | +.108 [.071, .156] | +.129 | −.017 |
+| m.L4 | .767 | +.036 [.014, .063] | +.096 | +.091 [.050, .143] | +.114 | −.017 |
+| d1.in | .813 | +.081 [.055, .112] | +.141 | +.111 [.078, .154] | +.140 | −.021 |
+
+- **The causal signature holds:** context helps only when the subject precedes the verb (before − after at `m.in`
+  +.146 [.076, .219]; same sign at every site from `m.in` on, largest at `d0.out.last` +.304).
+- **Context enters between `e1.L0` and `m.in`** (the stage-1 Mamba layers). `e1.L0` gains nothing and equals the
+  random model, consistent with sweep v2: `e1.L0` holds a context-free word summary, the layers after it add context.
+- **Both kinds of contested form:** true homographs (397 tokens) `m.in` .846 vs isolated .751, ceiling .756;
+  common-gender forms tagged with the subject's gender (היו, 253 tokens) .779 vs .684, ceiling .719.
+- **Not shallow cues:** a probe on the clitics plus the two preceding words stays below the ceiling (−.060).
+
+**Other tasks.** *Person* (18 forms): criterion met at `m.in`, `d1.resid`, `d0.out.last`, but by +.03 with lower
+bounds .010–.022; consistent with gender, too thin to stand alone. *Tense* (54 forms): context lifts minority
+readings (`m.L4` .541 vs isolated .226; DiD +.053 [.001, .119], `d1.dechunk` +.108) but never beats the ceiling.
+*Binyan* (22 forms): context lowers accuracy everywhere, also on unambiguous forms (`m.L4` −.061, `d1.dechunk`
+−.112), consistent with E5 (binyan fades in the main network). *Number* (6 forms): not interpretable.
+
+**Caveats:** no multiple-comparison correction over 10 sites × 5 tasks (gender's lower bounds would survive one,
+person's probably not); contested forms are dominated by a few frequent ones (hence the bootstrap over forms);
+the criterion was fixed after a 3-site smoke test (`m.L4` only) and before the full run; decodable, not shown
+to be used (no E4-style ablation).
 
 ### Final results (2026-10-03): sweep v2, E4, E1 rerun
 
@@ -154,6 +190,11 @@ Decodable doesn't mean used. Does removing the root code make the model worse at
 verb, more than removing a random code of the same size, and specifically where the verb's lexeme determines the
 continuation?
 
+**RQ4: Does the model resolve from context what the unvocalized spelling leaves open?** (added 2026-10-03)
+Many verb forms are ambiguous without vowels (תכתוב 2ms/3fs, נמצא past/present). Where does the representation
+reflect the reading the sentence requires rather than the form's usual reading, and does that depend on whether
+the disambiguating cue (the subject) has been seen yet?
+
 Hypotheses as falsifiable claims:
 
 | | Claim | Fails if |
@@ -162,11 +203,14 @@ Hypotheses as falsifiable claims:
 | H2 (RQ1) | The root code is abstract: it transfers from strong to weak roots | A root metric fit on strong roots does not beat the letter floor on held-out weak roots |
 | H3 (RQ2) | Root and pattern are routed separately (`d1.dechunk` vs `d1.resid`) and are linearly separable | No dissociation once CIs are added, or no additive root × pattern structure |
 | H4 (RQ3) | The root code is causally used for prediction after the verb | Ablating it hurts next-word loss no more than a random subspace of the same rank |
+| H5 (RQ4) | Some site resolves contested forms from context, beyond the form's majority reading and beyond shallow context cues | No site beats both the form-majority ceiling and the `ngram_ctx` probe on contested tokens (E6 criterion) |
 
 Status (2026-10-03): **H1** supported as *salience* (root dominates the geometry beyond letters and random,
 paired contrasts) but not as extra information. **H2** not supported (E1, see Findings), and could hardly have been
 under this formulation. **H3** supported for routing (E0 + E1 + E5, also without context); linear separability (E3b) cut. **H4** supported
-(E4: root − random +.036 [.031, .041]; held-out roots +.015–.017), with the edit-size caveat.
+(E4: root − random +.036 [.031, .041]; held-out roots +.015–.017), with the edit-size caveat. **H5** supported
+for gender (E6: `m.in` +.073 [.046, .106] over the ceiling, gain only when the subject precedes the verb), weakly
+for person, not for tense or binyan.
 
 ---
 
@@ -387,6 +431,34 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
 - **Optional E4b, within-word use:** ablate a character-level root subspace at the verb's own characters
   (`e0`/`d0`) and compare the loss on the remaining root letters vs pattern letters.
 
+### E6. Unvocalized ambiguity (RQ4, H5) ☑
+
+- **Goal:** test whether the representation reflects the reading the context requires, for forms whose spelling
+  allows several cells, and whether that depends on the cue having been seen (the model is causal).
+- **Labels** (derived in the script and aligned to `runs/mi/sweep/tokens.jsonl`; `ud_verbs.jsonl` is not rebuilt):
+  per token and task (binyan, tense, person, gender, number), the lexicon status of the spelling: `amb` (lexicon
+  gives >= 2 values), `unamb` (1), `common` (none: the form is unmarked, e.g. past 3pl gender), `unknown` (not in
+  the lexicon). **Contested** = the host form occurs in the scored tokens with >= 2 gold values, each >= 2 times.
+  Subject position from UD (`nsubj*`/`csubj*` dependent of the verb): before / after / none.
+- **Method:** logistic-regression probes (`sweep.fit_logreg`), 5-fold cross-validation over morph groups (every
+  token gets a held-out prediction; no lemma group in train and test), L2 chosen on fold 0's dev fold. All 25
+  feature sets on the same 27,696 tokens.
+- **Sites:** §4 sites plus `m.out`, `d1.in`, `d0.out.last`, each in context (`trained`) and isolated
+  (`trained_iso`); random model at `e1.L0`, `m.L4`, `d0.out.last`.
+- **Baselines:** `ngram` (letters of the host: same ceiling as an isolated word); `ngram_ctx` (host n-grams + the
+  clitics + the two preceding words and their last two letters: shallow cues a probe can read off directly).
+- **Measures:** accuracy per slice; on contested tokens the form-majority ceiling (oracle), accuracy on
+  minority-reading tokens, and the split by subject position and by lexicon status. Context gain = (in context −
+  isolated) on contested − the same on unambiguous tokens (DiD). Cluster bootstrap over host forms, shared by all
+  sites (paired differences).
+- **Pre-registered criterion:** H5 supported at a site if contested accuracy beats the ceiling **and** `ngram_ctx`,
+  both 95% CIs excluding 0. Prediction: `e0.*` and isolated features stay at or below the ceiling; gains appear
+  where context is integrated; gains vanish when the subject follows the verb.
+- **Result:** see "E6 results" at the top. Met for gender (4 sites), person (3, thin), number (3, 6 forms: not
+  interpretable); not met for tense or binyan.
+- **Not done:** an E4-style ablation of the gender direction (does the model *use* it to predict the agreeing
+  word?); a correction for multiple comparisons.
+
 ### Order and dependencies
 
 ```
@@ -412,6 +484,7 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-10-03 | sweep v2 (extraction) + E0 on it | 968021, 968022 | `runs/mi/sweep_v2/feats/`, `runs/mi/e0/report.md` | e0.out.after .839 / .813 in context, .925 / .868 alone; e1.L0 context-invariant; iso m.L4 − m.in +.088 / +.067; decoder split holds alone | H1, H3, context objection |
 | 2026-10-03 | E4 | 968023 | `runs/mi/e4/report.md`, `tokens.jsonl` | root +.040, random +.0046, full +.269; root − random +.036 [.031, .041]; held-out roots +.015–.017; ‖edit‖ 14.0 vs 8.5 | H4 supported (size caveat) |
 | 2026-10-03 | E1 rerun (`after`, iso sites) | 968153 | `runs/mi/e1/report.md` | e0.out.after .936, iso e1.L0 .947, iso m.L4 .913 (heldout 2-D); criterion still not met anywhere | H2 |
+| 2026-10-03 | E6 ambiguity | 968851 (array 0–3, 12 min) | `runs/mi/ambiguity/report.md`, `results.json`, `preds/`, `labels.jsonl` | Gender: criterion met at m.in (+.073 [.046, .106] over ceiling, +.133 over ngram_ctx), m.L4, d1.resid, d1.in; context gain only with the subject before the verb (m.in before − after +.146 [.076, .219]); e1.L0 no gain. Person met at 3 sites by ~+.03. Tense: DiD positive (m.L4 +.053, d1.dechunk +.108) but never above ceiling. Binyan: context lowers accuracy (m.L4 unamb −.061) | H5 supported (gender), weak (person), not (tense, binyan) |
 
 ---
 
@@ -430,6 +503,11 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-10-03 | E1 primary measure = AUC within the 2-D surface bins (raw AUC kept but at ceiling); claim reframed as salience (E0) vs availability (E1) | supervised letter features identify roots, weak ones included, about as well as the model's vectors (E1 smoke test) |
 | 2026-10-03 | E4: 20 random draws (not 10), full-replacement upper bound, edit norms recorded, GPU budget cap | 95th-percentile criterion needs ≥ 20 draws; norms guard against a "random removes less" artefact |
 | 2026-10-02 | Trimmed scope to §0: keep sweep v2, slim E1 and E4; cut control fix, E2, E3b/c, E4b | time-limited; E1's supervised letters baseline serves as the letter control, E0 already gave E3a |
+| 2026-10-03 | Added RQ4 / H5 / E6 (unvocalized ambiguity) on the saved sweep and sweep v2 features | nearly free (CPU, no extraction); unlike H2 it asks for information the spelling does not contain; uses the iso features as the no-context control |
+| 2026-10-03 | E6 main tasks = tense, person, gender; binyan and number reported as indicative | only 36 / 12 forms are binyan / number-contested in UD vs 106–231 for the others (counts before masking) |
+| 2026-10-03 | E6 labels derived in the script, aligned to `tokens.jsonl` with a check; `ud_verbs.jsonl` not rebuilt | a rebuild could reorder rows and break the alignment with the saved features |
+| 2026-10-03 | E6: 5-fold CV over morph groups instead of the fixed test split; L2 picked once (fold 0) | contested forms are too few for a 20% test split; one L2 choice keeps the CPU job ~1 min per site |
+| 2026-10-03 | E6: added the `common` lexicon status and the contested split by lexicon status (after the smoke test) | the top gender-contested forms (היו, הגיעו) are common-gender past 3pl tagged with the subject's gender: agreement tracking, not homograph resolution; they were mislabelled `unamb` |
 
 ## 8. Open questions
 
