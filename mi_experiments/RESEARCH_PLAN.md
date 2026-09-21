@@ -336,7 +336,7 @@ resumable: someone else submits the jobs), outputs in `runs/mi/<name>/`. Reuse `
 `runs/mi/sweep/feats/` where possible. Bootstrap CIs resample **roots**, not pairs or tokens (pairs that share a
 root are not independent). 1,000 resamples, 95% percentile intervals.
 
-### E0. Measurement hardening (prerequisite for RQ1–3) ☑ (v2 sites pending)
+### E0. Measurement hardening (prerequisite for RQ1–3) ☑
 
 - **Goal:** a root-similarity measure that random features cannot pass, with error bars and the missing readout.
 - **Changes:**
@@ -433,7 +433,7 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
   `d1.resid`. H3 predicts dechunk patches carry lexeme-dependent continuation preferences (governed prepositions,
   collocates) and resid patches carry form-dependent ones.
 
-### E4. Causal use of the root code (RQ3, H4) ☐ (slimmed: `m.L4.next` only, next-word loss, 20 random-subspace controls; no preposition breakdown, no E4b)
+### E4. Causal use of the root code (RQ3, H4) ☑ (slimmed: `m.L4.next` only, next-word loss, 20 random-subspace controls; no preposition breakdown, no E4b)
 
 - **Goal:** test whether the model needs the root code to predict what follows the verb.
 - **Method:** project the E1 root subspace out of the residual stream at the verb's `next` chunk (`m.L4`, and
@@ -462,6 +462,24 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
 - **Optional E4b, within-word use:** ablate a character-level root subspace at the verb's own characters
   (`e0`/`d0`) and compare the loss on the remaining root letters vs pattern letters.
 
+### E5. PCA and variance decomposition (RQ1, RQ2) ☑
+
+- **Goal:** a third, label-free angle on the geometry. Which properties dominate each site's main directions of
+  variation?
+- **Method** (`mi_experiments/pca_sites.py`, `scripts/mi_pca.sbatch`): rooted verbs of the seven binyanim, at most
+  20 per lemma; vectors standardized per dimension; PCA. Excess eta² (between-group / total sum of squares, minus
+  the same with shuffled labels) over all dimensions and inside the top-10 principal components, for root and
+  binyan across lemmas (lemma-mean vectors) and for lemma, tense, person, gender, number (tokens). For each of the
+  first 8 components: its best-explaining factor and correlations with host length, relative position and
+  sentence length. PC1 × PC2 figure coloured by binyan.
+- **Sites:** `e0.emb.mean`, `e0.out.mean`, `e1.L0`, `m.in`, `m.L4`, `m.out`, `d1.dechunk`, `d1.resid` (`next`
+  where applicable), trained and random.
+- **Result:** see "Findings so far" (E5 table) and the results log. Top-10 root share `m.in` .05 → `m.L4` .20;
+  binyan .21 → `m.out` .04; `dechunk` root-dominated, `resid` binyan- and agreement-dominated; random flat.
+  PC1 of `m.L4` / `m.out` / `dechunk` tracks sentence position.
+- **Caveat:** no letter control (letter-like representations have the largest root share over all dimensions), so
+  only comparisons within the trained model and against random.
+
 ### E6. Unvocalized ambiguity (RQ4, H5) ☑
 
 - **Goal:** test whether the representation reflects the reading the context requires, for forms whose spelling
@@ -489,6 +507,24 @@ root are not independent). 1,000 resamples, 95% percentile intervals.
   interpretable); not met for tense or binyan.
 - **Not done:** an E4-style ablation of the gender direction (does the model *use* it to predict the agreeing
   word?); a correction for multiple comparisons.
+
+### E7. Root directions vs principal directions (RQ1) ☑
+
+- **Goal:** link E1 (directions that best separate roots, supervised) and E5 (directions of largest variance,
+  unsupervised). Are the root directions among a site's dominant directions? This is salience in one number.
+- **Method** (`mi_experiments/root_directions.py`, `scripts/mi_rootdir.sbatch`): at each site, LDA on strong roots
+  (`root_split=train`) in the standardized space, with the **same** shrinkage (.5) and rank (64) everywhere; then
+  PCA of the same tokens. Measures: fraction of the root subspace (orthonormalised) inside the top-10 / top-50
+  principal components, and fraction of total variance in the root subspace, each over its chance value (K / D,
+  k / D). E1's own per-site fit is reported as a second column.
+- **Figure:** tokens of 8 held-out roots (`root_split=test`, never used in the fit), top-2 principal components of
+  the raw vectors vs of their projection onto the root subspace, at `m.in` and `m.L4`.
+- **Sites:** `e0.out.mean`, `e1.L0`, `m.in`, `m.L4`, `m.out`, `d1.dechunk`, `d1.resid`; random `e1.L0`, `m.L4`.
+- **Prediction:** overlap rises from `m.in` to `m.L4`; ~chance or below in a random network.
+- **Result:** see "E7 results" at the top. Top-10 overlap `m.in` 1.3× → `m.L4` 3.4× chance, `dechunk` 2.8×,
+  `resid` 1.7×, random below chance; held-out roots cluster in the root subspace and partly in raw `m.L4`.
+- **Caveat:** depends on LDA's shrinkage (E1's per-site alpha .01 pushed `m.out` / `dechunk` / `resid` below
+  chance, hence the fixed fit). Exploratory: no confidence intervals.
 
 ### Order and dependencies
 
