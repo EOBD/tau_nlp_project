@@ -17,10 +17,41 @@ log (§7) after every run.
 | 3 | E1, slimmed: LDA root metric, strong → weak, supervised letters-only baseline (`mi_experiments/root_metric.py`, `scripts/mi_e1.sbatch`) | ☑ jobs 966212 + 968153 (with `after` / iso sites) | RQ1/H2, RQ2 (second measure), subspace for E4 |
 | 5 | E5: PCA + variance decomposition at the key sites, trained vs random (`mi_experiments/pca_sites.py`, `scripts/mi_pca.sbatch`) | ☑ job 968065 (CPU, 3 min) | RQ1 / RQ2 from a third angle: what dominates each site's leading directions |
 | 4 | E4, slimmed: remove root subspace at `m.L4.next`, next-word loss vs 20 random subspaces (`mi_experiments/root_ablation.py`, `scripts/mi_e4.sbatch`) | ☑ job 968023 (GPU, 33 min, 2000 verbs) | RQ3/H4 |
+| 7 | E7: the root (LDA) directions vs the principal directions per site, and held-out roots drawn in the root subspace (`mi_experiments/root_directions.py`, `scripts/mi_rootdir.sbatch`) | ☑ job 969400 (CPU, 2 min) | RQ1 (salience, linking E1 and E5) |
 | 6 | E6: unvocalized ambiguity: probes on contested forms, in context vs isolated, split by subject position (`mi_experiments/ambiguity.py`, `scripts/mi_ambiguity.sbatch`) | ☑ job 968851 (CPU, 4 tasks, 12 min) | RQ4/H5 |
 
 Cut: standalone letter-control fix (E1's supervised letters baseline replaces it; E0 numbers are reported only as
 paired contrasts), E2, E3b, E3c, E4b, E4 preposition breakdown. Reported as limitations.
+
+### E7 results (2026-10-03): the root directions become dominant directions in the main network
+
+E5's PCA finds the directions of largest variance without labels; E1's LDA finds the directions that best separate
+roots. E7 asks how much the two coincide: the fraction of the root subspace (LDA, shrinkage .5, rank 64, the same
+at every site, fit on strong roots) that lies inside the top-10 principal components, over its chance value (10 / D).
+
+| site | inside top-10 PCs (× chance) | inside top-50 (× chance) | variance in root subspace (× chance) |
+|---|---|---|---|
+| e0.out.mean | 2.7× | 4.2× | 2.7× |
+| e1.L0.next | 3.5× | 4.9× | 3.6× |
+| m.in.next | 1.3× | 4.0× | 2.7× |
+| **m.L4.next** | **3.4×** | **5.3×** | 3.1× |
+| m.out.next | 2.9× | 4.0× | 2.4× |
+| d1.dechunk.next | 2.8× | 3.4× | 2.3× |
+| d1.resid.next | 1.7× | 4.3× | 3.2× |
+| random e1.L0 / m.L4 | 0.7× / 0.5× | 4.0× / 2.9× | 1.5× / 1.3× |
+
+- The top-10 overlap follows E0's U-shape and E5's root shares: high at `e1.L0`, low entering the main network
+  (`m.in` 1.3×), back up at `m.L4` (3.4×), kept into `dechunk` (2.8×), lower on the skip path (`resid` 1.7×). In a
+  random network the root directions are not among the top directions (below chance). This states salience in one
+  number that links the probe (E1) and the PCA (E5) results.
+- `resid`'s root subspace carries much variance overall (3.2×) but sits outside the top-10 directions: the root is
+  recoverable there (E1) but does not organise that path (E0, E5).
+- **Figure** (`runs/mi/rootdir/figs/root_clusters.png`): 8 held-out roots (never used to fit the subspace). In the
+  root subspace every root forms its own cluster at both `m.in` and `m.L4`. In the raw top-2 principal components
+  (no root information used) they are mostly mixed at `m.in`, but several separate on their own at `m.L4`.
+- **Caveat:** the overlap depends on LDA's shrinkage. With E1's per-site choices (alpha .01 at `m.out` / `dechunk` /
+  `resid`) those three fall below chance, because low shrinkage favours low-variance directions; hence the fixed fit.
+  Exploratory: no confidence intervals.
 
 ### E6 results (2026-10-03): context resolves gender ambiguity, from the main network on
 
@@ -484,6 +515,7 @@ One entry per run: date, job id, command, output path, headline numbers, and whi
 | 2026-10-03 | sweep v2 (extraction) + E0 on it | 968021, 968022 | `runs/mi/sweep_v2/feats/`, `runs/mi/e0/report.md` | e0.out.after .839 / .813 in context, .925 / .868 alone; e1.L0 context-invariant; iso m.L4 − m.in +.088 / +.067; decoder split holds alone | H1, H3, context objection |
 | 2026-10-03 | E4 | 968023 | `runs/mi/e4/report.md`, `tokens.jsonl` | root +.040, random +.0046, full +.269; root − random +.036 [.031, .041]; held-out roots +.015–.017; ‖edit‖ 14.0 vs 8.5 | H4 supported (size caveat) |
 | 2026-10-03 | E1 rerun (`after`, iso sites) | 968153 | `runs/mi/e1/report.md` | e0.out.after .936, iso e1.L0 .947, iso m.L4 .913 (heldout 2-D); criterion still not met anywhere | H2 |
+| 2026-10-03 | E7 root directions | 969397, 969400 | `runs/mi/rootdir/report.md`, `figs/root_clusters.png` | top-10-PC overlap of the root subspace: m.in 1.3× → m.L4 3.4× chance, dechunk 2.8×, resid 1.7×, random < 1×; held-out roots cluster in the root subspace and partly in raw m.L4 | H1 (salience) |
 | 2026-10-03 | E6 ambiguity | 968851 (array 0–3, 12 min) | `runs/mi/ambiguity/report.md`, `results.json`, `preds/`, `labels.jsonl` | Gender: criterion met at m.in (+.073 [.046, .106] over ceiling, +.133 over ngram_ctx), m.L4, d1.resid, d1.in; context gain only with the subject before the verb (m.in before − after +.146 [.076, .219]); e1.L0 no gain. Person met at 3 sites by ~+.03. Tense: DiD positive (m.L4 +.053, d1.dechunk +.108) but never above ceiling. Binyan: context lowers accuracy (m.L4 unamb −.061) | H5 supported (gender), weak (person), not (tense, binyan) |
 
 ---
