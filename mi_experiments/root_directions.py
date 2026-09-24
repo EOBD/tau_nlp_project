@@ -84,7 +84,7 @@ def figure(path, panels, rows, roots):
         lab = np.array([rows[i]["root"] for i in idx])
         for r, c in zip(roots, COLORS):
             m = lab == r
-            ax.scatter(P[m, 0], P[m, 1], s=14, c=c, alpha=0.75, linewidths=0, label=r[::-1])  # RTL for display
+            ax.scatter(P[m, 0], P[m, 1], s=14, c=c, alpha=0.75, linewidths=0, label=r)  # matplotlib applies bidi itself
         ax.set_title(title, fontsize=10, color="#333")
         ax.set_xticks([]), ax.set_yticks([])
         for s in ax.spines.values():
@@ -92,7 +92,7 @@ def figure(path, panels, rows, roots):
     h, l = axes[0, 0].get_legend_handles_labels()
     fig.legend(h, l, loc="lower center", ncol=N_ROOTS, frameon=False, markerscale=1.5, fontsize=10)
     fig.tight_layout(rect=(0, 0.08, 1, 1))
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
 
 
