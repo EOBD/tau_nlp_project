@@ -24,16 +24,21 @@ UD files, aligned to <sweep>/tokens.jsonl (the features' row order; ud_verbs.jso
   subject    position of the verb's UD subject (nsubj*, csubj* dependent): before / after / none. The model is causal:
              at the readout it has seen the text before the verb only, so a subject after the verb cannot help yet.
 Probes: sweep.fit_logreg on standardized features, 5-fold cross-validation over morph groups (morph_splits: lemmas
-sharing a root are one group), so every token gets a held-out prediction and no lemma is in train and test. L2 picked
-on the dev fold of fold 0 and reused. All sites are trained and scored on the same tokens (readouts missing at the end
-of a sentence are dropped everywhere).
+sharing a root are one group), so every token gets a held-out prediction and no lemma is in train and test. L2 is
+picked per outer fold on its own dev fold (f+1), never on the fold it scores. All sites are trained and scored on the
+same tokens (readouts missing at the end of a sentence are dropped everywhere); with --prefix strict (default) only
+tokens whose stage-1 and stage-2 chunk readouts sit on the character right after the word are kept, so every site has
+seen the same prefix and a subject after the verb cannot be visible yet.
 Baselines: ngram (letters of the host, the same ceiling as an isolated word), ngram_ctx (host n-grams plus the clitics
 before the host and the two preceding words: the shallow cues a probe can read off the context directly).
-Measures: accuracy per slice; on contested tokens also the form-majority ceiling (oracle: each form's majority gold
-reading over the eval tokens), accuracy on minority-reading tokens, and the split by subject position. CIs: cluster
+Measures: accuracy per slice; on contested tokens also the form-majority ceiling (oracle: each (form, fold)'s majority
+gold reading over the eval tokens, since each fold has its own probe; the per-form version is reported as
+ceiling_global), accuracy on minority-reading tokens, and the split by subject position. CIs: cluster
 bootstrap over host forms, resampled once per (task, slice) and shared by every site, so site differences are paired.
 Context gain = (trained − trained_iso) on contested − the same on unamb (the second term removes what context adds
 everywhere).
+Multiplicity: the primary comparison is PRIMARY (gender at m.in, fixed after the first run); every task × trained
+site criterion also gets a one-sided bootstrap p-value (the weaker of the two comparisons) with Holm adjustment.
 
 Outputs in <out>: labels.jsonl (per token: fold, slices, subject), preds/<model>__<key>.npz (out-of-fold class index
 per task, -1 = not scored), preds/<...>.json (classes, L2), results.json, report.md.
@@ -67,6 +72,8 @@ SLICES = ("unamb", "amb", "common", "contested", "unknown")
 LEX = ("amb", "common", "unamb", "unknown")
 SUBJ = ("before", "after", "none")
 MAIN_TASKS = ("tense", "person", "gender")  # the tasks with enough contested forms; binyan / number reported too
+PRIMARY = ("gender", "trained:m.in.next")  # primary comparison of the corrected run (chosen after the first run)
+POS_KEYS = ("s1_next", "s2_next")  # chunk readouts; restricted to the character right after the word (--prefix strict)
 
 
 # ============================================================================================ labels
@@ -166,7 +173,8 @@ def load_site(args, site, rows):
 # ============================================================================================ probes
 
 def probe_site(X, rows, fold, mask, dev):
-    """Out-of-fold predictions per task. Fold f is scored by a probe trained on the folds other than f and f+1."""
+    """Out-of-fold predictions per task. Fold f is scored by a probe trained on the folds other than f and f+1, with
+    L2 chosen on fold f+1 for that outer fold alone, so no fold's labels influence the probe that scores it."""
     out, info = {}, {}
     X = torch.tensor(np.asarray(X, np.float32), device=dev)
     for t, fn in TASKS.items():
@@ -175,23 +183,21 @@ def probe_site(X, rows, fold, mask, dev):
         classes = sorted({lab[i] for i in np.nonzero(keep)[0]})
         y = torch.tensor([classes.index(v) if v in classes else -1 for v in lab], device=dev)
         pred = np.full(len(rows), -1, np.int8)
-        l2 = None
+        l2s = []
         for f in range(FOLDS):
             te, va = keep & (fold == f), keep & (fold == (f + 1) % FOLDS)
             tr = keep & ~te & ~va
             itr, iva, ite = (torch.tensor(np.nonzero(m)[0], device=dev) for m in (tr, va, te))
             mu, sd = X[itr].mean(0), X[itr].std(0) + 1e-4
             Z = lambda i: (X[i] - mu) / sd
-            if l2 is None:  # chosen once, on fold 0's dev fold
-                accs = []
-                for c in L2_GRID:
-                    W, b = fit_logreg(Z(itr), y[itr], len(classes), c)
-                    accs.append(((Z(iva) @ W + b).argmax(1) == y[iva]).float().mean().item())
-                l2 = L2_GRID[int(np.argmax(accs))]
-            W, b = fit_logreg(Z(itr), y[itr], len(classes), l2)
+            fits = [fit_logreg(Z(itr), y[itr], len(classes), c) for c in L2_GRID]
+            accs = [((Z(iva) @ W + b).argmax(1) == y[iva]).float().mean().item() for W, b in fits]
+            k = int(np.argmax(accs))
+            l2s.append(L2_GRID[k])
+            W, b = fits[k]
             pred[ite.cpu().numpy()] = (Z(ite) @ W + b).argmax(1).cpu().numpy()
         out[t] = pred
-        info[t] = {"classes": classes, "l2": l2}
+        info[t] = {"classes": classes, "l2": l2s}
     return out, info
 
 
@@ -229,11 +235,15 @@ def task_tables(t, rows, lab, P, sites, boot):
     idx = np.nonzero(scored)[0]
     classes = P[sites[0]][t]["classes"]
     y = np.array([classes.index(gold[i]) if gold[i] in classes else -1 for i in range(len(rows))])
-    readings = defaultdict(Counter)
+    readings, readings_ff = defaultdict(Counter), defaultdict(Counter)
     for i in idx:
         readings[lab[i]["host"]][y[i]] += 1
+        readings_ff[(lab[i]["host"], lab[i]["fold"])][y[i]] += 1
     contested = {h for h, c in readings.items() if sum(v >= MIN_READING for v in c.values()) >= 2}
     major = {h: c.most_common(1)[0][0] for h, c in readings.items()}
+    # Each fold has its own probe, so a context-free feature can get one reading per (form, fold), not per form:
+    # the ceiling a context-free site can reach under this cross-validation is the per-(form, fold) majority.
+    major_ff = {k: c.most_common(1)[0][0] for k, c in readings_ff.items()}
     sl = np.array(["contested" if lab[i]["host"] in contested else lab[i][f"lex_{t}"] for i in range(len(rows))])
     res = {"n": {}, "acc": defaultdict(dict), "reps": {}}
     for s_name in SLICES:
@@ -248,6 +258,7 @@ def task_tables(t, rows, lab, P, sites, boot):
         subsets = {"all": np.ones(len(ti), bool)}
         if s_name == "contested":
             is_major = np.array([y[i] == major[lab[i]["host"]] for i in ti])
+            is_major_ff = np.array([y[i] == major_ff[(lab[i]["host"], lab[i]["fold"])] for i in ti])
             subsets["minority"] = ~is_major
             for p in SUBJ:
                 subsets[f"subj_{p}"] = np.array([lab[i]["subject"] == p for i in ti])
@@ -265,9 +276,10 @@ def task_tables(t, rows, lab, P, sites, boot):
                 continue
             key = f"{s_name}.{sub}"
             if s_name == "contested":
-                c = np.bincount(f_of[m], weights=is_major[m], minlength=len(forms))
-                res["acc"]["ceiling"][key] = float(c.sum() / n.sum())
-                res["reps"][("ceiling", key)] = ratio(W, c, n)
+                for name, hit in (("ceiling", is_major_ff), ("ceiling_global", is_major)):
+                    c = np.bincount(f_of[m], weights=hit[m], minlength=len(forms))
+                    res["acc"][name][key] = float(c.sum() / n.sum())
+                    res["reps"][(name, key)] = ratio(W, c, n)
             for s in sites:
                 ok = P[s][t]["pred"][ti[m]] == y[ti[m]]
                 c = np.bincount(f_of[m], weights=ok, minlength=len(forms))
@@ -313,6 +325,25 @@ def sig(d):
     return d is not None and d[1][0] is not None and d[1][0] > 0
 
 
+def boot_p(res, a, b, key="contested.all"):
+    """One-sided bootstrap p-value for acc(a) > acc(b): share of resamples with no advantage (+1 smoothing)."""
+    ra, rb = res["reps"].get((a, key)), res["reps"].get((b, key))
+    if ra is None or rb is None:
+        return 1.0
+    d = ra - rb
+    d = d[~np.isnan(d)]
+    return float((np.sum(d <= 0) + 1) / (len(d) + 1))
+
+
+def holm(ps):
+    order = np.argsort(ps)
+    adj, run = np.empty(len(ps)), 0.0
+    for r, i in enumerate(order):
+        run = max(run, min(1.0, (len(ps) - r) * ps[i]))
+        adj[i] = run
+    return adj
+
+
 def report(args, rows, lab):
     P = {}
     for s in args.sites.split(","):
@@ -330,9 +361,12 @@ def report(args, rows, lab):
          "(groups = morph groups), all sites on the same tokens. 95% cluster-bootstrap CI over host forms "
          f"({args.boot} resamples) in brackets. **contested** = forms seen with >= 2 gold readings (each >= "
          f"{MIN_READING} tokens); **ceiling** = predict each form's majority reading (oracle; the best an isolated "
-         "word or its letters can do). **minority** = contested tokens whose reading is not their form's majority "
+         "word or its letters can do under this cross-validation, per (form, fold) since each fold has its own probe; "
+         "ceiling_global = one majority per form, as in the first run). **minority** = contested tokens whose reading is not their form's majority "
          "(ceiling 0 by construction). Subject = position of the UD subject relative to the verb.\n"]
-    R = {}
+    if getattr(args, "mask_info", None):
+        L.append(f"Token set: {args.mask_info}\n")
+    R, tests = {}, []
     for t in TASKS:
         res = task_tables(t, rows, lab, P, sites, boot)
         R[t] = {"n": res["n"], "acc": res["acc"]}
@@ -347,8 +381,9 @@ def report(args, rows, lab):
               if c else "",
               "| site | unamb | amb | contested | − ceiling | minority | subj before | subj after | subj none |",
               "|" + "---|" * 9]
-        L.append(f"| ceiling | | | {fa(res, 'ceiling', 'contested.all')} | | 0 | "
-                 + " | ".join(fa(res, "ceiling", f"contested.subj_{p}") for p in SUBJ) + " |")
+        for cn in ("ceiling", "ceiling_global"):
+            L.append(f"| {cn} | | | {fa(res, cn, 'contested.all')} | | 0 | "
+                     + " | ".join(fa(res, cn, f"contested.subj_{p}") for p in SUBJ) + " |")
         for s in sites:
             L.append(f"| {s} | {fa(res, s, 'unamb.all')} | {fa(res, s, 'amb.all')} | {fa(res, s, 'contested.all')} "
                      f"| {fd(diff(res, s, 'ceiling', 'contested.all'))} | {fa(res, s, 'contested.minority')} | "
@@ -373,11 +408,16 @@ def report(args, rows, lab):
                 pt = gb[0] - ga[0]
                 r = (res["reps"][(s, kb)] - res["reps"][(iso, kb)]) - (res["reps"][(s, ka)] - res["reps"][(iso, ka)])
                 ba = (pt, ci(r))
+            R[t].setdefault("context_gain", {})[s] = {"did": did(res, s, iso), "before_minus_after": ba,
+                                                      "subj_before": gb, "subj_after": ga}
             L.append(f"| {s.split(':', 1)[1]} | {fd(diff(res, s, iso, 'contested.all'))} | "
                      f"{fd(diff(res, s, iso, 'unamb.all'))} | {fd(did(res, s, iso))} | {fd(gb)} | {fd(ga)} | {fd(ba)} |")
         L += ["\n**Criterion** (pre-registered): context resolves the ambiguity at a site if its contested accuracy "
-              "beats the ceiling *and* the shallow-cue probe (ngram_ctx), both CIs excluding 0.\n",
-              "| site | − ceiling | − ngram_ctx | − random (same site) | met |", "|---|---|---|---|---|"]
+              "beats the (fold-aware) ceiling *and* the shallow-cue probe (ngram_ctx), both CIs excluding 0. "
+              "p = one-sided bootstrap p-value of the weaker of the two comparisons (intersection-union test); "
+              "Holm adjustment over every task × trained site below.\n",
+              "| site | − ceiling | − ngram_ctx | − random (same site) | p | met (unadjusted) |",
+              "|---|---|---|---|---|---|"]
         crit = []
         for s in tr:
             d1 = diff(res, s, "ceiling", "contested.all")
@@ -385,9 +425,32 @@ def report(args, rows, lab):
             rnd = "random:" + s.split(":", 1)[1]
             d3 = diff(res, s, rnd, "contested.all") if rnd in P else None
             met = sig(d1) and sig(d2)
+            p = max(boot_p(res, s, "ceiling"), boot_p(res, s, "baseline:ngram_ctx"))
             crit.append(met)
-            L.append(f"| {s} | {fd(d1)} | {fd(d2)} | {fd(d3)} | {'**met**' if met else 'not met'} |")
+            tests.append((t, s, p))
+            R[t].setdefault("criterion", {})[s] = {"minus_ceiling": d1, "minus_ngram_ctx": d2, "minus_random": d3,
+                                                   "p": p, "met": met}
+            L.append(f"| {s} | {fd(d1)} | {fd(d2)} | {fd(d3)} | {p:.4f} | {'**met**' if met else 'not met'} |")
         R[t]["criterion_met_at"] = [s for s, m in zip(tr, crit) if m]
+        R[t]["criterion_p"] = {s: p for tt, s, p in tests if tt == t}
+    adj = holm([p for _, _, p in tests])
+    for t in TASKS:
+        R[t]["criterion_met_at_holm"] = [s for (tt, s, _), a in zip(tests, adj) if tt == t and a < 0.05]
+        for (tt, s, _), a in zip(tests, adj):
+            if tt == t:
+                R[t]["criterion"][s]["holm_p"] = float(a)
+    R["token_set"] = getattr(args, "mask_info", None)
+    prim = next((p for (tt, s, p) in tests if (tt, s) == PRIMARY), None)
+    R["primary"] = {"task": PRIMARY[0], "site": PRIMARY[1], "p": prim}
+    L += [f"\n## Multiplicity\n",
+          f"**Primary comparison:** {PRIMARY[0]} at `{PRIMARY[1]}` (fixed before this run, after the first E6 run "
+          f"showed it): p = {fmt(prim, 4)}, {'met' if prim is not None and prim < 0.05 else 'not met'} at 0.05.\n",
+          f"Holm over all {len(tests)} task × site criterion tests (family-wise 0.05). Bootstrap p-values have a floor "
+          f"of 1/({args.boot}+1). The bootstrap resamples host forms; it does not cover probe-fit randomness, site "
+          "selection in earlier experiments, or LM training randomness.\n",
+          "| task | site | p | Holm p | met after Holm |", "|---|---|---|---|---|"]
+    L += [f"| {t} | {s} | {p:.4f} | {a:.4f} | {'**met**' if a < 0.05 else 'not met'} |"
+          for (t, s, p), a in zip(tests, adj)]
     for name, text in (("report.md", "\n".join(L) + "\n"), ("results.json", json.dumps(R, indent=1, ensure_ascii=False))):
         part = os.path.join(args.out, f"{name}.{args.shard}.part")  # shards may finish together
         with open(part, "w", encoding="utf-8") as f:
@@ -403,7 +466,9 @@ def main():
     ap.add_argument("--sweep", default="runs/mi/sweep")
     ap.add_argument("--sweep2", default="runs/mi/sweep_v2", help="second feature source (after / iso)")
     ap.add_argument("--data", default="data/morph")
-    ap.add_argument("--out", default="runs/mi/ambiguity")
+    ap.add_argument("--out", default="runs/mi/ambiguity_v2", help="runs/mi/ambiguity holds the first run")
+    ap.add_argument("--prefix", choices=("strict", "any"), default="strict",
+                    help="strict: only tokens whose chunk readouts sit on the character right after the word")
     ap.add_argument("--sites", default=",".join(DEFAULT_SITES))
     ap.add_argument("--stages", default="probe,report")
     ap.add_argument("--boot", type=int, default=1000)
@@ -431,7 +496,38 @@ def main():
             print(f"[ambiguity] {s}: no features, skipped", flush=True)
             continue
         mask &= v if s.startswith("baseline:") else v[0]
+    n_site = int(mask.sum())
+    if args.prefix == "strict":
+        # Same observed prefix at every site: keep tokens whose stage-1 and stage-2 "next" chunks start on the
+        # character right after the word, so no readout has seen more than that one character past the verb.
+        # Positions are the trained model's (sweep_v2 saved them; same token rows as the sweep). The random model
+        # routes differently, so its readouts are not covered: a reference only, outside the criterion.
+        d = os.path.join(args.sweep2, "feats", "trained")
+        meta = json.load(open(os.path.join(d, "meta.json")))
+        rows2 = [json.loads(l) for l in open(os.path.join(args.sweep2, "tokens.jsonl"), encoding="utf-8")]
+        if [(r["sent_id"], r["start"]) for r in rows2] != [(r["sent_id"], r["start"]) for r in rows]:
+            raise SystemExit("sweep_v2 token rows differ from the sweep's")
+        pos = np.load(os.path.join(d, "positions.npy"))
+        c = meta["position_columns"]
+        mask &= np.all([pos[:, c.index(k)] == pos[:, c.index("end")] for k in POS_KEYS], 0)
+    args.mask_info = (f"{n_site} tokens valid at every site; prefix={args.prefix}: {int(mask.sum())} kept, "
+                      f"{n_site - int(mask.sum())} excluded because a chunk readout starts later than the character "
+                      "right after the word")
     fold = np.array([e["fold"] for e in lab])
+    prov = {"args": {k: v for k, v in vars(args).items() if k not in ("shard", "nshards", "mask_info", "stages")},
+            "salt": SALT, "folds": FOLDS, "l2_grid": list(L2_GRID), "scored_tokens_sha256":
+            hashlib.sha256(np.nonzero(mask)[0].astype(np.int64).tobytes()).hexdigest(),
+            "files": {f: hashlib.sha256(open(f, "rb").read()).hexdigest() for f in (
+                os.path.join(args.sweep, "tokens.jsonl"), os.path.join(args.sweep2, "feats", "trained", "positions.npy"),
+                os.path.abspath(__file__))}}
+    ppath = os.path.join(args.out, "provenance.json")
+    if os.path.exists(ppath) and {k: v for k, v in json.load(open(ppath)).items() if k != "files"} != \
+            {k: v for k, v in prov.items() if k != "files"}:
+        raise SystemExit(f"{args.out} was built with other settings (see provenance.json): use a new --out")
+    with open(f"{ppath}.{args.shard}.part", "w") as f:
+        json.dump(prov, f, indent=1)
+    os.replace(f"{ppath}.{args.shard}.part", ppath)
+    print(f"[ambiguity] {args.mask_info}", flush=True)
     print(f"[ambiguity] {len(rows)} tokens, {mask.sum()} scored; subjects "
           f"{dict(Counter(e['subject'] for e in lab))}; folds {dict(sorted(Counter(fold.tolist()).items()))}", flush=True)
     if "probe" in args.stages:
